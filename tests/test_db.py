@@ -17,6 +17,7 @@ def test_create_tables(temp_db):
     assert 'monthly_metrics' in tables
     assert 'review_queue' in tables
     assert 'run_log' in tables
+    assert 'sale_classifications' in tables
 
 
 def test_raw_sales_insert_and_dedupe(temp_db):
@@ -188,3 +189,35 @@ def test_database_close(temp_db):
     tables = db.list_tables()
     assert len(tables) >= 6
     db.close()
+
+
+class TestSaleClassificationsTable:
+    """Test sale_classifications table exists and works."""
+
+    def test_table_exists(self, temp_db):
+        """sale_classifications table is created."""
+        db = Database(temp_db)
+        db.init_schema()
+        tables = db.list_tables()
+        assert 'sale_classifications' in tables
+        db.close()
+
+    def test_insert_classification(self, temp_db):
+        """Can insert and query a classification."""
+        db = Database(temp_db)
+        db.init_schema()
+        db.execute("""
+            INSERT INTO sale_classifications (
+                sale_id, address, zoning, year_built, has_duplex_keywords,
+                is_auto_excluded, auto_exclude_reason, review_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, ('sale_123', '15 Smith St Revesby', 'R2', 1965, False, False, None, 'pending'))
+
+        rows = db.query("SELECT * FROM sale_classifications WHERE sale_id = ?", ('sale_123',))
+        assert len(rows) == 1
+        assert rows[0]['address'] == '15 Smith St Revesby'
+        assert rows[0]['zoning'] == 'R2'
+        assert rows[0]['year_built'] == 1965
+        assert rows[0]['review_status'] == 'pending'
+        assert rows[0]['use_in_median'] == 0  # Default FALSE
+        db.close()

@@ -232,6 +232,35 @@ class Database:
             ON run_log(run_type, started_at)
         """)
 
+        # 7. sale_classifications - Comparable review tracking
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sale_classifications (
+                sale_id TEXT PRIMARY KEY,
+                address TEXT NOT NULL,
+                zoning TEXT,
+                year_built INTEGER,
+                has_duplex_keywords BOOLEAN DEFAULT FALSE,
+                is_auto_excluded BOOLEAN DEFAULT FALSE,
+                auto_exclude_reason TEXT,
+                review_status TEXT DEFAULT 'pending'
+                    CHECK(review_status IN ('pending', 'comparable', 'not_comparable')),
+                reviewed_at TIMESTAMP,
+                review_notes TEXT,
+                use_in_median BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sale_classifications_status
+            ON sale_classifications(review_status, is_auto_excluded)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sale_classifications_median
+            ON sale_classifications(use_in_median)
+        """)
+
         conn.commit()
 
     def upsert_raw_sales(self, sales: List[dict]) -> int:
