@@ -1,10 +1,9 @@
-name: Fortnightly PropertyTracker Report
+name: Weekly PropertyTracker Report
 
 on:
-  # Fortnightly schedule: 1st and 15th of each month at 9 AM AEST (23:00 UTC previous day)
+  # Weekly schedule: Every Sunday at 9 AM AEST (Saturday 23:00 UTC)
   schedule:
-    - cron: '0 23 1 * *'   # 1st of month at 23:00 UTC (9am AEST next day)
-    - cron: '0 23 15 * *'  # 15th of month at 23:00 UTC (9am AEST next day)
+    - cron: '0 23 * * 6'  # Every Saturday 23:00 UTC = Sunday 9am AEST
 
   # Manual trigger with options
   workflow_dispatch:
@@ -18,6 +17,11 @@ on:
         description: 'Dry run (no Telegram message)'
         required: false
         default: 'false'
+        type: boolean
+      run_enrich:
+        description: 'Run enrichment for new sales'
+        required: false
+        default: 'true'
         type: boolean
 
 env:
@@ -79,6 +83,7 @@ jobs:
                 area_min: 500
                 area_max: 600
               description: "500-600sqm land, comparable to your IP"
+              require_manual_review: true
 
             wollstonecraft_units:
               display_name: "Wollstonecraft Units (PPOR)"
@@ -86,7 +91,7 @@ jobs:
               property_type: unit
               role: proxy
               filters:
-                streets: [lamont, milner, wollstonecraft]
+                streets: [lamont st, milner cres, shirley rd]
               description: "Units near Lamont St, comparable to your PPOR"
 
             lane_cove_houses:
@@ -114,6 +119,7 @@ jobs:
             show_proxies: [revesby_houses, wollstonecraft_units]
             show_targets: [lane_cove_houses, chatswood_houses]
             include_explanations: true
+            show_recent_sales: true
             title: "PropertyTracker Report"
 
           data:
@@ -136,8 +142,17 @@ jobs:
           purchase_costs:
             rate: 0.01
 
+          # Time adjustment rates for forward projections (conservative)
+          time_adjustment:
+            default_growth_rate: 0.05
+            segment_growth_rates:
+              revesby_houses: 0.05       # 5% - conservative for SW Sydney
+              wollstonecraft_units: 0.04 # 4% - units are slower growth
+              lane_cove_houses: 0.05     # 5% - established North Shore
+              chatswood_houses: 0.05     # 5% - established North Shore
+
           schedule:
-            frequency: fortnightly
+            frequency: weekly
             timezone: Australia/Sydney
           EOF
 
@@ -153,7 +168,34 @@ jobs:
           restore-keys: |
             tracker-db-
 
-      - name: Run PropertyTracker
+      - name: Step 1 - Ingest new sales data
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          FORCE_FLAG=""
+          if [ "${{ github.event.inputs.force_download }}" == "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+          python -m tracker ingest $FORCE_FLAG
+
+      - name: Step 2 - Enrich new Revesby sales
+        if: github.event.inputs.run_enrich != 'false'
+        env:
+          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
+        run: |
+          python -m tracker enrich --segment revesby_houses --limit 20
+
+      - name: Step 3 - Check pending reviews
+        run: |
+          echo "=== Pending Reviews ==="
+          python -m tracker pending --segment revesby_houses || true
+
+      - name: Step 4 - Compute metrics
+        run: |
+          python -m tracker compute
+
+      - name: Step 5 - Send report
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -162,18 +204,20 @@ jobs:
           PPOR_DEBT: ${{ secrets.PPOR_DEBT }}
           IP_DEBT: ${{ secrets.IP_DEBT }}
         run: |
-          FORCE_FLAG=""
           DRY_RUN_FLAG=""
-
-          if [ "${{ github.event.inputs.force_download }}" == "true" ]; then
-            FORCE_FLAG="--force"
-          fi
-
           if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
             DRY_RUN_FLAG="--dry-run"
           fi
+          python -m tracker notify $DRY_RUN_FLAG
 
-          python -m tracker run $FORCE_FLAG $DRY_RUN_FLAG
+      - name: Step 6 - Send review request (if pending)
+        if: github.event.inputs.run_enrich != 'false'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Only send review request if there are pending sales
+          python -m tracker review-send --segment revesby_houses || echo "No pending reviews"
 
       - name: Save database to cache
         uses: actions/cache/save@v4
@@ -182,20 +226,20 @@ jobs:
           path: data/tracker.db
           key: tracker-db-${{ github.run_number }}
 
+      - name: Upload database backup
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: database-${{ github.run_number }}
+          path: data/tracker.db
+          retention-days: 90
+
       - name: Upload logs
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: logs-${{ github.run_number }}
           path: logs/
-          retention-days: 30
-
-      - name: Upload outputs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: outputs-${{ github.run_number }}
-          path: outputs/
           retention-days: 30
 
   # Test job - runs on PRs and pushes
