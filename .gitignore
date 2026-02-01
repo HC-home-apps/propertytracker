@@ -31,6 +31,14 @@ ENV/
 *.swp
 *.swo
 
+# macOS
+.DS_Store
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
 # Project specific
 data/tracker.db
 data/raw/
