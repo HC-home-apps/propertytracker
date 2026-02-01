@@ -457,3 +457,153 @@ def send_gap_widening_alert(
             severity='warning',
         )
     return True  # No alert needed
+
+
+# ============================================================
+# SIMPLIFIED REPORT FORMAT
+# ============================================================
+
+@dataclass
+class SegmentPosition:
+    """Position summary for a single segment."""
+    segment_code: str
+    display_name: str
+    median_price: Optional[int]
+    debt: int
+    equity_or_net: Optional[int]  # Usable equity (IP) or net proceeds (PPOR)
+    is_ppor: bool  # True = PPOR (net after sale), False = IP (usable equity)
+
+
+def compute_segment_position(
+    metric: MetricResult,
+    debt: int,
+    is_ppor: bool,
+    haircut: float = 0.95,
+    lvr_cap: float = 0.80,
+    selling_cost_rate: float = 0.02,
+) -> SegmentPosition:
+    """
+    Compute position for a single segment.
+
+    For PPOR: net = (value * haircut - selling_costs) - debt
+    For IP: equity = (value * haircut * lvr_cap) - debt
+    """
+    equity_or_net = None
+
+    if metric.median_price:
+        if is_ppor:
+            # PPOR: Net proceeds after sale
+            gross = metric.median_price * haircut
+            selling_costs = metric.median_price * selling_cost_rate
+            equity_or_net = int(gross - selling_costs - debt)
+        else:
+            # IP: Usable equity at 80% LVR
+            gross = metric.median_price * haircut * lvr_cap
+            equity_or_net = int(gross - debt)
+
+    return SegmentPosition(
+        segment_code=metric.segment,
+        display_name=metric.display_name or metric.segment,
+        median_price=metric.median_price,
+        debt=debt,
+        equity_or_net=equity_or_net,
+        is_ppor=is_ppor,
+    )
+
+
+def format_simple_report(
+    new_sales: Dict[str, List],  # segment_code -> list of SaleRecord
+    positions: Dict[str, SegmentPosition],  # segment_code -> SegmentPosition
+    period: str,
+    config: Optional[dict] = None,
+) -> str:
+    """
+    Format a simplified weekly report.
+
+    Structure:
+    1. Recent comparable sales (since last report)
+    2. Brief position summary (median -> equity)
+
+    Args:
+        new_sales: Dict mapping segment codes to lists of new SaleRecord
+        positions: Dict mapping segment codes to SegmentPosition
+        period: Period string (e.g., "Feb 2, 2026")
+        config: Optional config dict
+
+    Returns:
+        Formatted HTML message for Telegram
+    """
+    lines = [f"<b>PropertyTracker - {period}</b>", ""]
+
+    # Get display order from config
+    report_config = config.get('report', {}) if config else {}
+    show_proxies = report_config.get('show_proxies', ['revesby_houses', 'wollstonecraft_units'])
+
+    # Section 1: Recent Sales
+    for segment_code in show_proxies:
+        if segment_code not in new_sales:
+            continue
+
+        segment = get_segment(segment_code)
+        if not segment:
+            continue
+
+        sales = new_sales[segment_code]
+        filter_desc = segment.get_filter_description() or ""
+
+        # Header with filter info
+        header = f"<b>{segment.display_name}</b>"
+        if filter_desc:
+            header += f" ({filter_desc})"
+        header += f" - {len(sales)} new"
+        lines.append(header)
+
+        if sales:
+            for sale in sales:
+                # Format: date: address (size) - $price
+                date_str = sale.contract_date
+                if segment.property_type == 'house' and sale.area_sqm:
+                    lines.append(f"  {date_str}: {sale.address} ({sale.area_sqm:.0f}sqm) - {format_currency(sale.price)}")
+                else:
+                    lines.append(f"  {date_str}: {sale.address} - {format_currency(sale.price)}")
+        else:
+            lines.append("  No new sales this week")
+
+        lines.append("")
+
+    # Divider
+    lines.append("---")
+
+    # Section 2: Position Summary
+    for segment_code in show_proxies:
+        if segment_code not in positions:
+            continue
+
+        pos = positions[segment_code]
+        if pos.median_price is None:
+            lines.append(f"{pos.display_name}: No data")
+            continue
+
+        median_str = format_currency(pos.median_price)
+        if pos.equity_or_net is not None:
+            equity_str = format_currency(pos.equity_or_net)
+            label = "net" if pos.is_ppor else "equity"
+            # Shorten display name for position line
+            short_name = pos.display_name.split(' (')[0]
+            lines.append(f"{short_name}: {median_str} median -> ~{equity_str} {label}")
+        else:
+            lines.append(f"{pos.display_name}: {median_str} median")
+
+    return "\n".join(lines)
+
+
+def send_simple_report(
+    config: TelegramConfig,
+    new_sales: Dict[str, List],
+    positions: Dict[str, SegmentPosition],
+    period: str,
+    app_config: Optional[dict] = None,
+) -> bool:
+    """Send the simplified report via Telegram."""
+    message = format_simple_report(new_sales, positions, period, app_config)
+    return send_message(config, message)

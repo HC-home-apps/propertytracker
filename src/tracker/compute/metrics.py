@@ -332,6 +332,89 @@ def get_period_sales_with_details(
     return prices, oldest_date, newest_date, recent_sales
 
 
+def get_new_sales_since_date(
+    db: Database,
+    segment_code: str,
+    since_date: date,
+) -> List[SaleRecord]:
+    """
+    Get sales for a segment that have contract_date on or after since_date.
+
+    Used for "new sales since last report" in simplified reports.
+
+    Args:
+        db: Database connection
+        segment_code: Segment to query
+        since_date: Only include sales on or after this date
+
+    Returns:
+        List of SaleRecord objects, newest first
+    """
+    segment = get_segment(segment_code)
+    if not segment:
+        return []
+
+    suburbs = list(segment.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    base_where = f"""
+        LOWER(suburb) IN ({placeholders})
+        AND property_type = ?
+        AND contract_date >= ?
+        AND purchase_price > 0
+    """
+
+    params: List = list(suburbs) + [segment.property_type, since_date.isoformat()]
+
+    # Add area filter if specified
+    if segment.area_min is not None:
+        base_where += " AND area_sqm >= ?"
+        params.append(segment.area_min)
+    if segment.area_max is not None:
+        base_where += " AND area_sqm <= ?"
+        params.append(segment.area_max)
+
+    # Add street filter if specified
+    if segment.streets:
+        street_list = list(segment.streets)
+        street_placeholders = ','.join(['?' for _ in street_list])
+        base_where += f" AND LOWER(street_name) IN ({street_placeholders})"
+        params.extend(street_list)
+
+    # Add price filter if specified
+    if segment.price_min is not None:
+        base_where += " AND purchase_price >= ?"
+        params.append(segment.price_min)
+    if segment.price_max is not None:
+        base_where += " AND purchase_price <= ?"
+        params.append(segment.price_max)
+
+    query = f"""
+        SELECT contract_date, house_number, unit_number, street_name,
+               purchase_price, area_sqm
+        FROM raw_sales
+        WHERE {base_where}
+        ORDER BY contract_date DESC
+    """
+
+    rows = db.query(query, tuple(params))
+
+    sales = []
+    for row in rows:
+        unit = f"Unit {row['unit_number']} " if row['unit_number'] else ""
+        house = row['house_number'] or ""
+        address = f"{unit}{house} {row['street_name']}".strip()
+
+        sales.append(SaleRecord(
+            contract_date=row['contract_date'],
+            address=address,
+            price=row['purchase_price'],
+            area_sqm=row['area_sqm'],
+        ))
+
+    return sales
+
+
 def get_verified_sales_with_dates(
     db: Database,
     segment_code: str,

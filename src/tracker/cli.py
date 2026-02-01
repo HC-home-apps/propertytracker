@@ -24,14 +24,19 @@ from tracker.compute.segments import (
 from tracker.compute.metrics import (
     compute_all_metrics,
     save_metrics_to_db,
+    get_new_sales_since_date,
 )
 from tracker.compute.gap_tracker import compute_gap_tracker
 from tracker.compute.equity import compute_affordability_gap
+from tracker.compute.segments import get_segment
 from tracker.notify.telegram import (
     TelegramConfig,
     send_monthly_report,
     send_ingest_failure_alert,
     format_monthly_report,
+    format_simple_report,
+    send_simple_report,
+    compute_segment_position,
 )
 
 # Load .env file
@@ -250,8 +255,11 @@ def compute(ctx, ref_date):
 @cli.command()
 @click.option('--date', '-d', 'ref_date', default=None, help='Reference date (YYYY-MM-DD)')
 @click.option('--dry-run', is_flag=True, help='Print message without sending')
+@click.option('--format', '-f', 'report_format', default=None,
+              type=click.Choice(['simple', 'detailed']),
+              help='Report format (overrides config)')
 @click.pass_context
-def notify(ctx, ref_date, dry_run):
+def notify(ctx, ref_date, dry_run, report_format):
     """Send report via Telegram."""
     db = Database(ctx.obj['db_path'])
     db.init_schema()
@@ -263,78 +271,21 @@ def notify(ctx, ref_date, dry_run):
         if ref_date:
             reference_date = datetime.strptime(ref_date, '%Y-%m-%d').date()
         else:
-            reference_date = date.today().replace(day=1)
+            reference_date = date.today()
 
-        period_str = reference_date.strftime('%B %Y')
-        click.echo(f"Preparing report for {period_str}...")
+        # Determine report format
+        report_config = config.get('report', {})
+        fmt = report_format or report_config.get('format', 'simple')
 
-        # Get thresholds from config
-        thresholds = config.get('thresholds', {})
-
-        # Compute metrics
-        metrics = compute_all_metrics(db, reference_date, thresholds)
-
-        # Get gap tracker config
-        gap_config = config.get('gap_tracker', {})
-        proxy_codes = gap_config.get('proxy_segments', ['revesby_houses', 'wollstonecraft_units'])
-        target_code = gap_config.get('target_segment', 'lane_cove_houses')
-
-        # Get proxy and target metrics for gap tracker
-        proxy_metrics = {code: metrics[code] for code in proxy_codes if code in metrics}
-        target_metric = metrics.get(target_code)
-
-        if not target_metric:
-            raise click.ClickException(f"Target segment '{target_code}' not found in metrics")
-
-        # Compute gap tracker
-        gap_tracker = compute_gap_tracker(proxy_metrics, target_metric, config)
-
-        # Get values for affordability calculation
-        ip_metric = metrics.get('revesby_houses')
-        ppor_metric = metrics.get('wollstonecraft_units')
-
-        # Check we have valid data
-        missing_data = []
-        if not ip_metric or ip_metric.is_suppressed:
-            missing_data.append("Revesby houses")
-        if not ppor_metric or ppor_metric.is_suppressed:
-            missing_data.append("Wollstonecraft units")
-        if not target_metric or target_metric.is_suppressed:
-            missing_data.append(f"Target ({target_code})")
-
-        if missing_data:
-            click.echo(f"Warning: Missing or suppressed data for: {', '.join(missing_data)}")
-            click.echo("Cannot compute full affordability analysis.")
-            return
-
-        # Compute affordability gap
-        affordability = compute_affordability_gap(
-            config,
-            ip_metric.median_price,
-            ppor_metric.median_price,
-            target_metric.median_price,
-        )
-
-        if dry_run:
-            message = format_monthly_report(metrics, gap_tracker, affordability, period_str, config)
-            click.echo("\n--- DRY RUN ---")
-            click.echo(message)
-            click.echo("--- END ---\n")
+        if fmt == 'simple':
+            _send_simple_report(db, config, reference_date, dry_run)
         else:
-            telegram_config = TelegramConfig.from_env()
-            success = send_monthly_report(
-                telegram_config,
-                metrics,
-                gap_tracker,
-                affordability,
-                period_str,
-                config,
-            )
+            _send_detailed_report(db, config, reference_date, dry_run)
 
-            if success:
-                click.echo("Report sent successfully!")
-            else:
-                raise click.ClickException("Failed to send report")
+        # Log successful run
+        if not dry_run:
+            run_id = db.start_run('notify', 'cli')
+            db.complete_run(run_id, 'success')
 
     except Exception as e:
         logger.exception("Notify failed")
@@ -342,6 +293,151 @@ def notify(ctx, ref_date, dry_run):
 
     finally:
         db.close()
+
+
+def _send_simple_report(db: Database, config: dict, reference_date: date, dry_run: bool):
+    """Send the simplified sales + position report."""
+    from datetime import timedelta
+
+    report_config = config.get('report', {})
+    show_proxies = report_config.get('show_proxies', ['revesby_houses', 'wollstonecraft_units'])
+
+    # Get last successful report date (default to 7 days ago)
+    last_run = db.get_last_successful_run('notify')
+    if last_run and last_run.get('completed_at'):
+        last_report_date = datetime.fromisoformat(last_run['completed_at']).date()
+    else:
+        last_report_date = reference_date - timedelta(days=7)
+
+    click.echo(f"Finding sales since {last_report_date}...")
+
+    # Compute metrics for medians
+    thresholds = config.get('thresholds', {})
+    metrics = compute_all_metrics(db, reference_date, thresholds)
+
+    # Get new sales for each proxy segment
+    new_sales = {}
+    for segment_code in show_proxies:
+        sales = get_new_sales_since_date(db, segment_code, last_report_date)
+        new_sales[segment_code] = sales
+        click.echo(f"  {segment_code}: {len(sales)} new sales")
+
+    # Compute positions for each segment
+    positions = {}
+    ip_debt = config.get('investment_property', {}).get('debt', 0)
+    ppor_debt = config.get('ppor', {}).get('debt', 0)
+    haircut = config.get('investment_property', {}).get('valuation_haircut', {}).get('base', 0.95)
+    lvr_cap = config.get('investment_property', {}).get('refinance_lvr_cap', 0.80)
+    selling_cost_rate = config.get('ppor', {}).get('selling_cost_rate', 0.02)
+
+    for segment_code in show_proxies:
+        metric = metrics.get(segment_code)
+        if not metric:
+            continue
+
+        # Determine if PPOR or IP based on segment
+        is_ppor = 'wollstonecraft' in segment_code or 'ppor' in segment_code.lower()
+        debt = ppor_debt if is_ppor else ip_debt
+
+        positions[segment_code] = compute_segment_position(
+            metric,
+            debt=debt,
+            is_ppor=is_ppor,
+            haircut=haircut,
+            lvr_cap=lvr_cap,
+            selling_cost_rate=selling_cost_rate,
+        )
+
+    # Format report
+    period_str = reference_date.strftime('%b %-d, %Y')
+    message = format_simple_report(new_sales, positions, period_str, config)
+
+    if dry_run:
+        click.echo("\n--- DRY RUN ---")
+        click.echo(message)
+        click.echo("--- END ---\n")
+    else:
+        telegram_config = TelegramConfig.from_env()
+        success = send_simple_report(telegram_config, new_sales, positions, period_str, config)
+
+        if success:
+            click.echo("Report sent successfully!")
+        else:
+            raise click.ClickException("Failed to send report")
+
+
+def _send_detailed_report(db: Database, config: dict, reference_date: date, dry_run: bool):
+    """Send the full detailed report with gap tracker and affordability."""
+    period_str = reference_date.strftime('%B %Y')
+    click.echo(f"Preparing detailed report for {period_str}...")
+
+    # Get thresholds from config
+    thresholds = config.get('thresholds', {})
+
+    # Compute metrics
+    metrics = compute_all_metrics(db, reference_date, thresholds)
+
+    # Get gap tracker config
+    gap_config = config.get('gap_tracker', {})
+    proxy_codes = gap_config.get('proxy_segments', ['revesby_houses', 'wollstonecraft_units'])
+    target_code = gap_config.get('target_segment', 'lane_cove_houses')
+
+    # Get proxy and target metrics for gap tracker
+    proxy_metrics = {code: metrics[code] for code in proxy_codes if code in metrics}
+    target_metric = metrics.get(target_code)
+
+    if not target_metric:
+        raise click.ClickException(f"Target segment '{target_code}' not found in metrics")
+
+    # Compute gap tracker
+    gap_tracker = compute_gap_tracker(proxy_metrics, target_metric, config)
+
+    # Get values for affordability calculation
+    ip_metric = metrics.get('revesby_houses')
+    ppor_metric = metrics.get('wollstonecraft_units')
+
+    # Check we have valid data
+    missing_data = []
+    if not ip_metric or ip_metric.is_suppressed:
+        missing_data.append("Revesby houses")
+    if not ppor_metric or ppor_metric.is_suppressed:
+        missing_data.append("Wollstonecraft units")
+    if not target_metric or target_metric.is_suppressed:
+        missing_data.append(f"Target ({target_code})")
+
+    if missing_data:
+        click.echo(f"Warning: Missing or suppressed data for: {', '.join(missing_data)}")
+        click.echo("Cannot compute full affordability analysis.")
+        return
+
+    # Compute affordability gap
+    affordability = compute_affordability_gap(
+        config,
+        ip_metric.median_price,
+        ppor_metric.median_price,
+        target_metric.median_price,
+    )
+
+    if dry_run:
+        message = format_monthly_report(metrics, gap_tracker, affordability, period_str, config)
+        click.echo("\n--- DRY RUN ---")
+        click.echo(message)
+        click.echo("--- END ---\n")
+    else:
+        telegram_config = TelegramConfig.from_env()
+        success = send_monthly_report(
+            telegram_config,
+            metrics,
+            gap_tracker,
+            affordability,
+            period_str,
+            config,
+        )
+
+        if success:
+            click.echo("Report sent successfully!")
+        else:
+            raise click.ClickException("Failed to send report")
 
 
 @cli.command()

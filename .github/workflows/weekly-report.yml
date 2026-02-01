@@ -1,9 +1,11 @@
 name: Weekly PropertyTracker Report
 
 on:
-  # Weekly schedule: Every Sunday at 9 AM AEST (Saturday 23:00 UTC)
+  # Weekly schedule: Every Friday at 7 AM AEST (Thursday 20:00 UTC)
+  # Friday chosen because: NSW VG publishes weekly, data refreshes at 5am,
+  # and Friday gives weekend time to review if needed
   schedule:
-    - cron: '0 23 * * 6'  # Every Saturday 23:00 UTC = Sunday 9am AEST
+    - cron: '0 20 * * 4'  # Every Thursday 20:00 UTC = Friday 7am AEST
 
   # Manual trigger with options
   workflow_dispatch:
@@ -119,6 +121,7 @@ jobs:
             secondary_target: chatswood_houses
 
           report:
+            format: simple
             show_proxies: [revesby_houses, wollstonecraft_units]
             show_targets: [lane_cove_houses, chatswood_houses]
             include_explanations: true
@@ -138,8 +141,8 @@ jobs:
 
           thresholds:
             min_sample_monthly: 3
-            min_sample_quarterly: 5
-            min_sample_6month: 8
+            min_sample_quarterly: 4
+            min_sample_6month: 5
             gap_alert_threshold: 20000
 
           purchase_costs:
@@ -182,17 +185,26 @@ jobs:
           fi
           python -m tracker ingest $FORCE_FLAG
 
-      - name: Step 2 - Enrich new Revesby sales
+      - name: Step 2a - Enrich new Revesby sales
         if: github.event.inputs.run_enrich != 'false'
         env:
           DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
         run: |
           python -m tracker enrich --segment revesby_houses --limit 20
 
+      - name: Step 2b - Enrich new Wollstonecraft sales
+        if: github.event.inputs.run_enrich != 'false'
+        env:
+          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
+        run: |
+          python -m tracker enrich --segment wollstonecraft_units --limit 20
+
       - name: Step 3 - Check pending reviews
         run: |
-          echo "=== Pending Reviews ==="
+          echo "=== Pending Reviews (Revesby) ==="
           python -m tracker pending --segment revesby_houses || true
+          echo "=== Pending Reviews (Wollstonecraft) ==="
+          python -m tracker pending --segment wollstonecraft_units || true
 
       - name: Step 4 - Compute metrics
         run: |
@@ -213,14 +225,15 @@ jobs:
           fi
           python -m tracker notify $DRY_RUN_FLAG
 
-      - name: Step 6 - Send review request (if pending)
+      - name: Step 6 - Send review requests (if pending)
         if: github.event.inputs.run_enrich != 'false'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Only send review request if there are pending sales
-          python -m tracker review-send --segment revesby_houses || echo "No pending reviews"
+          # Send review requests for both segments
+          python -m tracker review-send --segment revesby_houses || echo "No pending Revesby reviews"
+          python -m tracker review-send --segment wollstonecraft_units || echo "No pending Wollstonecraft reviews"
 
       - name: Save database to cache
         uses: actions/cache/save@v4
