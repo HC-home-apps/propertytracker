@@ -493,5 +493,305 @@ def pending(ctx, segment):
     db.close()
 
 
+@cli.command('review-send')
+@click.option('--segment', default='revesby_houses', help='Segment to send for review')
+@click.option('--limit', default=50, help='Max sales to send')
+@click.option('--dry-run', is_flag=True, help='Print message without sending')
+@click.pass_context
+def review_send(ctx, segment, limit, dry_run):
+    """Send pending sales to Telegram for review."""
+    from tracker.review.telegram import format_review_message
+    from tracker.notify.telegram import TelegramConfig, send_message
+
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config.get('segments', {}))
+
+    db = Database(db_path=ctx.obj['db_path'])
+
+    # Get segment config for filters
+    seg = SEGMENTS.get(segment)
+    if not seg:
+        raise click.ClickException(f"Unknown segment: {segment}")
+
+    # Build query for pending sales
+    suburbs = list(seg.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    query = f"""
+        SELECT
+            sc.sale_id,
+            r.house_number || ' ' || r.street_name as address,
+            r.purchase_price as price,
+            r.area_sqm,
+            sc.zoning,
+            sc.year_built,
+            r.contract_date
+        FROM sale_classifications sc
+        JOIN raw_sales r ON sc.sale_id = r.dealing_number
+        WHERE sc.review_status = 'pending'
+          AND sc.is_auto_excluded = 0
+          AND LOWER(r.suburb) IN ({placeholders})
+          AND r.property_type = ?
+    """
+    params = list(suburbs) + [seg.property_type]
+
+    # Add area filter if specified
+    if seg.area_min is not None:
+        query += " AND r.area_sqm >= ?"
+        params.append(seg.area_min)
+    if seg.area_max is not None:
+        query += " AND r.area_sqm <= ?"
+        params.append(seg.area_max)
+
+    query += " ORDER BY r.contract_date DESC LIMIT ?"
+    params.append(limit)
+
+    rows = db.query(query, tuple(params))
+
+    if not rows:
+        click.echo("No sales pending review")
+        db.close()
+        return
+
+    # Convert to list of dicts
+    sales = [dict(row) for row in rows]
+    click.echo(f"Found {len(sales)} sales pending review")
+
+    # Format message
+    message = format_review_message(sales)
+
+    if dry_run:
+        click.echo("\n--- DRY RUN ---")
+        click.echo(message)
+        click.echo("--- END ---\n")
+        click.echo(f"\nTo apply a response, run:")
+        click.echo(f"  propertytracker review-apply --response 'y' * {len(sales)}")
+    else:
+        telegram_config = TelegramConfig.from_env()
+        success = send_message(telegram_config, message)
+
+        if success:
+            click.echo("Review message sent to Telegram!")
+            click.echo(f"\nReply with {len(sales)} characters (y/n for each sale)")
+            click.echo(f"Then run: propertytracker review-apply --response '<your_response>'")
+        else:
+            raise click.ClickException("Failed to send Telegram message")
+
+    db.close()
+
+
+@cli.command('review-apply')
+@click.option('--segment', default='revesby_houses', help='Segment to apply reviews to')
+@click.option('--response', '-r', required=True, help='Review response (y/n string)')
+@click.pass_context
+def review_apply(ctx, segment, response):
+    """Apply review response to pending sales.
+
+    Response is a string of y/n characters, one per sale.
+    Example: --response 'ynyynyyy'
+    """
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config.get('segments', {}))
+
+    db = Database(db_path=ctx.obj['db_path'])
+
+    # Get segment config for filters
+    seg = SEGMENTS.get(segment)
+    if not seg:
+        raise click.ClickException(f"Unknown segment: {segment}")
+
+    # Build query for pending sales (same order as review-send)
+    suburbs = list(seg.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    query = f"""
+        SELECT
+            sc.sale_id,
+            r.house_number || ' ' || r.street_name as address,
+            r.purchase_price
+        FROM sale_classifications sc
+        JOIN raw_sales r ON sc.sale_id = r.dealing_number
+        WHERE sc.review_status = 'pending'
+          AND sc.is_auto_excluded = 0
+          AND LOWER(r.suburb) IN ({placeholders})
+          AND r.property_type = ?
+    """
+    params = list(suburbs) + [seg.property_type]
+
+    if seg.area_min is not None:
+        query += " AND r.area_sqm >= ?"
+        params.append(seg.area_min)
+    if seg.area_max is not None:
+        query += " AND r.area_sqm <= ?"
+        params.append(seg.area_max)
+
+    query += " ORDER BY r.contract_date DESC"
+
+    rows = db.query(query, tuple(params))
+
+    if not rows:
+        click.echo("No sales pending review")
+        db.close()
+        return
+
+    # Clean response
+    response = response.strip().lower()
+
+    if len(response) != len(rows):
+        click.echo(f"Error: Response has {len(response)} chars, but {len(rows)} sales pending")
+        click.echo(f"\nExpected response: {'y' * len(rows)} (all yes) or similar")
+        click.echo("\nSales pending:")
+        for i, row in enumerate(rows, 1):
+            click.echo(f"  {i}. {row['address']} - ${row['purchase_price']:,}")
+        db.close()
+        return
+
+    # Apply reviews
+    approved = 0
+    rejected = 0
+
+    for i, row in enumerate(rows):
+        sale_id = row['sale_id']
+        choice = response[i]
+
+        if choice == 'y':
+            db.execute("""
+                UPDATE sale_classifications
+                SET review_status = 'comparable', use_in_median = 1
+                WHERE sale_id = ?
+            """, (sale_id,))
+            approved += 1
+        else:
+            db.execute("""
+                UPDATE sale_classifications
+                SET review_status = 'not_comparable', use_in_median = 0
+                WHERE sale_id = ?
+            """, (sale_id,))
+            rejected += 1
+
+    click.echo(f"\nApproved as comparable: {approved}")
+    click.echo(f"Rejected: {rejected}")
+
+    # Show summary
+    summary = db.query("""
+        SELECT COUNT(*) as n, AVG(r.purchase_price) as avg_price
+        FROM sale_classifications sc
+        JOIN raw_sales r ON sc.sale_id = r.dealing_number
+        WHERE sc.review_status = 'comparable'
+          AND sc.use_in_median = 1
+    """)
+
+    if summary and summary[0]['n'] > 0:
+        click.echo(f"\nTotal verified comparables: {summary[0]['n']}")
+        click.echo(f"Average price: ${int(summary[0]['avg_price']):,}")
+
+    db.close()
+
+
+@cli.command('report')
+@click.option('--date', '-d', 'ref_date', default=None, help='Reference date (YYYY-MM-DD)')
+@click.option('--detailed', is_flag=True, help='Show detailed report with all sales')
+@click.pass_context
+def report(ctx, ref_date, detailed):
+    """Generate and display property report."""
+    from tracker.compute.time_adjust import compute_time_adjusted_median
+
+    db = Database(ctx.obj['db_path'])
+    db.init_schema()
+
+    try:
+        config = load_config(ctx.obj['config_path'])
+        init_segments(config)
+
+        if ref_date:
+            reference_date = datetime.strptime(ref_date, '%Y-%m-%d').date()
+        else:
+            reference_date = date.today().replace(day=1)
+
+        # Get growth rates from config
+        time_config = config.get('time_adjustment', {})
+        growth_rates = time_config.get('segment_growth_rates', {})
+        default_rate = time_config.get('default_growth_rate', 0.07)
+
+        # Get thresholds from config
+        thresholds = config.get('thresholds', {})
+
+        click.echo(f"PropertyTracker Report - {reference_date.strftime('%B %Y')}")
+        click.echo("=" * 50)
+        click.echo()
+
+        # Compute metrics with growth rates
+        metrics = compute_all_metrics(db, reference_date, thresholds, growth_rates)
+
+        # Display Your Properties
+        click.echo("YOUR PROPERTIES")
+        click.echo("-" * 30)
+
+        proxy_codes = ['revesby_houses', 'wollstonecraft_units']
+        for code in proxy_codes:
+            if code in metrics:
+                m = metrics[code]
+                if m.is_suppressed:
+                    click.echo(f"{m.display_name}: Suppressed ({m.suppression_reason})")
+                else:
+                    yoy = f"{m.yoy_pct:+.1f}%" if m.yoy_pct else "N/A"
+                    click.echo(f"{m.display_name}:")
+                    click.echo(f"  Median: ${m.median_price:,} ({yoy})")
+                    if m.time_adjusted_median:
+                        click.echo(f"  Time-adjusted: ${m.time_adjusted_median:,}")
+                        click.echo(f"  Range: ${m.time_adjusted_low:,} - ${m.time_adjusted_high:,}")
+                        click.echo(f"  Verified comparables: {m.verified_sample_size}")
+                    click.echo()
+
+        # Display Target Markets
+        click.echo("\nTARGET MARKETS")
+        click.echo("-" * 30)
+
+        target_codes = ['lane_cove_houses', 'chatswood_houses']
+        for code in target_codes:
+            if code in metrics:
+                m = metrics[code]
+                if m.is_suppressed:
+                    click.echo(f"{m.display_name}: Suppressed ({m.suppression_reason})")
+                else:
+                    yoy = f"{m.yoy_pct:+.1f}%" if m.yoy_pct else "N/A"
+                    click.echo(f"{m.display_name}: ${m.median_price:,} ({yoy}, n={m.sample_size})")
+
+        click.echo()
+
+        # Compute affordability if we have data
+        ip_metric = metrics.get('revesby_houses')
+        ppor_metric = metrics.get('wollstonecraft_units')
+        target_metric = metrics.get('lane_cove_houses')
+
+        if (ip_metric and not ip_metric.is_suppressed and
+            ppor_metric and not ppor_metric.is_suppressed and
+            target_metric and not target_metric.is_suppressed):
+
+            click.echo("AFFORDABILITY GAP")
+            click.echo("-" * 30)
+
+            affordability = compute_affordability_gap(
+                config,
+                ip_metric.median_price,
+                ppor_metric.median_price,
+                target_metric.median_price,
+            )
+
+            base = affordability.base
+            click.echo(f"Target: Lane Cove @ ${target_metric.median_price:,}")
+            click.echo(f"Total needed: ${base.total_purchase_cost:,} (inc stamp duty)")
+            click.echo(f"Your cash: ${base.total_cash:,}")
+            click.echo(f"Gap: ${base.affordability_gap:,}")
+
+            if affordability.months_to_close_gap:
+                years = affordability.months_to_close_gap // 12
+                months = affordability.months_to_close_gap % 12
+                click.echo(f"Time to close: ~{years}y {months}m")
+
+    finally:
+        db.close()
+
+
 if __name__ == '__main__':
     cli()
