@@ -18,6 +18,10 @@ import numpy as np
 
 from tracker.db import Database
 from tracker.compute.segments import SEGMENTS, Segment, get_segment
+from tracker.compute.time_adjust import (
+    compute_time_adjusted_median,
+    TimeAdjustedResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +61,12 @@ class MetricResult:
     oldest_sale_date: Optional[str] = None  # Oldest sale in sample
     newest_sale_date: Optional[str] = None  # Newest sale in sample
     recent_sales: Optional[List[SaleRecord]] = None  # Last N sales for transparency
+    # Time-adjusted fields (for reviewed segments)
+    time_adjusted_median: Optional[int] = None  # Time-adjusted median (base case)
+    time_adjusted_low: Optional[int] = None  # Conservative estimate
+    time_adjusted_high: Optional[int] = None  # Optimistic estimate
+    verified_sample_size: Optional[int] = None  # Number of verified comparables
+    growth_rate_used: Optional[float] = None  # Annual growth rate used for adjustment
 
 
 def compute_median(prices: List[int]) -> Optional[int]:
@@ -292,6 +302,90 @@ def get_period_sales_with_details(
     return prices, oldest_date, newest_date, recent_sales
 
 
+def get_verified_sales_with_dates(
+    db: Database,
+    segment_code: str,
+) -> List[Dict]:
+    """
+    Get verified comparable sales with all details for time adjustment.
+
+    Args:
+        db: Database connection
+        segment_code: Segment to query
+
+    Returns:
+        List of sale dicts with purchase_price, contract_date, sale_id, address
+    """
+    segment = get_segment(segment_code)
+    if not segment:
+        return []
+
+    suburbs = list(segment.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    query = f"""
+        SELECT
+            r.dealing_number as sale_id,
+            sc.address,
+            r.purchase_price,
+            r.contract_date,
+            r.area_sqm
+        FROM sale_classifications sc
+        JOIN raw_sales r ON sc.sale_id = r.dealing_number
+        WHERE sc.review_status = 'comparable'
+          AND sc.use_in_median = 1
+          AND LOWER(r.suburb) IN ({placeholders})
+          AND r.property_type = ?
+    """
+
+    params: List = list(suburbs) + [segment.property_type]
+
+    # Add area filter if specified
+    if segment.area_min is not None:
+        query += " AND r.area_sqm >= ?"
+        params.append(segment.area_min)
+    if segment.area_max is not None:
+        query += " AND r.area_sqm <= ?"
+        params.append(segment.area_max)
+
+    query += " ORDER BY r.contract_date DESC"
+
+    rows = db.query(query, tuple(params))
+    return [dict(row) for row in rows]
+
+
+def compute_verified_time_adjusted_metrics(
+    db: Database,
+    segment_code: str,
+    reference_date: Optional[date] = None,
+    growth_rate: float = 0.07,
+) -> Optional[TimeAdjustedResult]:
+    """
+    Compute time-adjusted median for a segment using verified sales only.
+
+    Args:
+        db: Database connection
+        segment_code: Segment to compute
+        reference_date: Date to adjust all sales to (default: first of current month)
+        growth_rate: Annual growth rate assumption (default: 7%)
+
+    Returns:
+        TimeAdjustedResult or None if no verified sales
+    """
+    sales = get_verified_sales_with_dates(db, segment_code)
+
+    if not sales:
+        return None
+
+    return compute_time_adjusted_median(
+        sales,
+        reference_date=reference_date,
+        base_growth_rate=growth_rate,
+        conservative_rate=0.05,
+        optimistic_rate=0.10,
+    )
+
+
 def compute_segment_metrics(
     db: Database,
     segment_code: str,
@@ -471,24 +565,34 @@ def compute_all_metrics(
     db: Database,
     reference_date: date,
     thresholds: Optional[Dict] = None,
+    growth_rates: Optional[Dict[str, float]] = None,
 ) -> Dict[str, MetricResult]:
     """
     Compute metrics for all segments.
+
+    For segments with verified comparable sales (require_manual_review=True),
+    also computes time-adjusted medians.
 
     Args:
         db: Database connection
         reference_date: End date for metrics
         thresholds: Optional dict with min_sample_* overrides
+        growth_rates: Optional dict mapping segment_code -> annual growth rate
 
     Returns:
         Dict mapping segment codes to MetricResult
     """
     if thresholds is None:
         thresholds = {}
+    if growth_rates is None:
+        growth_rates = {}
+
+    # Default growth rate for segments without specific config
+    default_growth_rate = 0.07
 
     results = {}
     for segment_code in SEGMENTS:
-        results[segment_code] = compute_segment_metrics(
+        result = compute_segment_metrics(
             db,
             segment_code,
             reference_date,
@@ -496,6 +600,36 @@ def compute_all_metrics(
             min_sample_quarterly=thresholds.get('min_sample_quarterly', MIN_SAMPLE_QUARTERLY),
             min_sample_6month=thresholds.get('min_sample_6month', MIN_SAMPLE_6MONTH),
         )
+
+        # Check if this segment has verified sales for time-adjusted calculation
+        verified_count = get_verified_sales_count(db, segment_code)
+        if verified_count > 0:
+            growth_rate = growth_rates.get(segment_code, default_growth_rate)
+            time_adjusted = compute_verified_time_adjusted_metrics(
+                db,
+                segment_code,
+                reference_date=reference_date,
+                growth_rate=growth_rate,
+            )
+
+            if time_adjusted:
+                # Update result with time-adjusted values
+                result.time_adjusted_median = time_adjusted.weighted_median
+                result.time_adjusted_low = time_adjusted.conservative_median
+                result.time_adjusted_high = time_adjusted.optimistic_median
+                result.verified_sample_size = time_adjusted.sample_size
+                result.growth_rate_used = time_adjusted.growth_rate_annual
+
+                # Use time-adjusted as the primary median for reviewed segments
+                result.median_price = time_adjusted.weighted_median
+
+                logger.info(
+                    f"{segment_code}: Using time-adjusted median ${time_adjusted.weighted_median:,} "
+                    f"(range ${time_adjusted.conservative_median:,}-${time_adjusted.optimistic_median:,}) "
+                    f"from {time_adjusted.sample_size} verified sales"
+                )
+
+        results[segment_code] = result
 
     return results
 

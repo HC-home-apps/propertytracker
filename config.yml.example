@@ -156,6 +156,21 @@ enrichment:
   domain_api_key: ${DOMAIN_API_KEY}  # Optional: Domain API key for year built lookup
 
 # ===================
+# TIME ADJUSTMENT
+# ===================
+# Growth rates for time-adjusting older sales to current values
+# Used for segments with require_manual_review: true
+time_adjustment:
+  default_growth_rate: 0.07  # 7% p.a. default for Sydney
+
+  # Per-segment growth rate overrides
+  segment_growth_rates:
+    revesby_houses: 0.07     # 7% - based on Southwest Sydney data
+    wollstonecraft_units: 0.05  # 5% - more stable unit market
+    lane_cove_houses: 0.06   # 6% - established area
+    chatswood_houses: 0.06   # 6% - established area
+
+# ===================
 # SCHEDULE
 # ===================
 schedule:
