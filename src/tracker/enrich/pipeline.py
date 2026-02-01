@@ -9,6 +9,7 @@ from tracker.db import Database
 from tracker.enrich.classifier import has_exclude_keywords, should_auto_exclude
 from tracker.enrich.domain import get_year_built
 from tracker.enrich.zoning import get_zoning
+from tracker.compute.segments import get_segment
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def classify_sale(enrichment: Dict[str, Any]) -> Dict[str, Any]:
     return {
         'is_auto_excluded': is_excluded,
         'auto_exclude_reason': reason,
-        'review_status': 'pending' if not is_excluded else 'pending',
+        'review_status': 'pending' if not is_excluded else 'not_comparable',
         'use_in_median': False,  # Never auto-approve
     }
 
@@ -104,22 +105,47 @@ def process_pending_sales(
     Returns:
         Number of sales processed
     """
-    # Find unclassified sales for this segment
-    # For now, we match by suburb - segment filtering happens at query time
-    query = """
+    # Get segment configuration
+    segment = get_segment(segment_code)
+    if not segment:
+        logger.warning(f"Unknown segment: {segment_code}")
+        return 0
+
+    # Build dynamic query based on segment config
+    suburbs = list(segment.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    query = f"""
         SELECT r.id, r.dealing_number, r.house_number, r.street_name,
                r.suburb, r.postcode, r.area_sqm
         FROM raw_sales r
         LEFT JOIN sale_classifications sc ON r.dealing_number = sc.sale_id
         WHERE sc.sale_id IS NULL
-          AND LOWER(r.suburb) IN ('revesby', 'revesby heights')
-          AND r.property_type = 'house'
-          AND r.area_sqm BETWEEN 500 AND 600
-        ORDER BY r.contract_date DESC
-        LIMIT ?
+          AND LOWER(r.suburb) IN ({placeholders})
+          AND r.property_type = ?
     """
 
-    sales = db.query(query, (limit,))
+    params: List = list(suburbs) + [segment.property_type]
+
+    # Add area filter if specified
+    if segment.area_min is not None:
+        query += " AND r.area_sqm >= ?"
+        params.append(segment.area_min)
+    if segment.area_max is not None:
+        query += " AND r.area_sqm <= ?"
+        params.append(segment.area_max)
+
+    # Add street filter if specified
+    if segment.streets:
+        street_list = list(segment.streets)
+        street_placeholders = ','.join(['?' for _ in street_list])
+        query += f" AND LOWER(r.street_name) IN ({street_placeholders})"
+        params.extend(street_list)
+
+    query += " ORDER BY r.contract_date DESC LIMIT ?"
+    params.append(limit)
+
+    sales = db.query(query, tuple(params))
     processed = 0
 
     for sale in sales:

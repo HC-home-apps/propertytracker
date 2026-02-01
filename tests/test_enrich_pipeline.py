@@ -83,6 +83,7 @@ class TestClassifySale:
 
         assert result['is_auto_excluded'] is True
         assert 'non-R2' in result['auto_exclude_reason']
+        assert result['review_status'] == 'not_comparable'
         assert result['use_in_median'] is False
 
     def test_marks_pending_for_valid_sale(self):
