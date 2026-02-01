@@ -438,5 +438,60 @@ def check_samples(ctx):
     db.close()
 
 
+@cli.command()
+@click.option('--segment', default='revesby_houses', help='Segment to enrich')
+@click.option('--limit', default=50, help='Max sales to process')
+@click.option('--api-key', envvar='DOMAIN_API_KEY', help='Domain API key')
+@click.pass_context
+def enrich(ctx, segment, limit, api_key):
+    """Enrich and classify sales for comparable review."""
+    from tracker.enrich.pipeline import process_pending_sales
+
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config.get('segments', {}))
+
+    db = Database(db_path=ctx.obj['db_path'])
+    db.init_schema()
+
+    processed = process_pending_sales(db, segment, api_key=api_key, limit=limit)
+    click.echo(f"Processed {processed} sales for {segment}")
+
+    db.close()
+
+
+@cli.command()
+@click.option('--segment', default='revesby_houses', help='Segment to show pending')
+@click.pass_context
+def pending(ctx, segment):
+    """Show sales pending review."""
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config.get('segments', {}))
+
+    db = Database(db_path=ctx.obj['db_path'])
+
+    rows = db.query("""
+        SELECT sc.sale_id, sc.address, sc.zoning, sc.year_built, r.purchase_price, r.area_sqm
+        FROM sale_classifications sc
+        JOIN raw_sales r ON sc.sale_id = r.dealing_number
+        WHERE sc.review_status = 'pending'
+          AND sc.is_auto_excluded = 0
+        ORDER BY r.contract_date DESC
+        LIMIT 20
+    """)
+
+    if not rows:
+        click.echo("No sales pending review")
+        db.close()
+        return
+
+    click.echo(f"{len(rows)} sales pending review:\n")
+    for i, row in enumerate(rows, 1):
+        click.echo(f"{i}. {row['address']}")
+        click.echo(f"   ${row['purchase_price']:,} | {row['area_sqm']:.0f}sqm | {row['zoning'] or 'Unknown'} | {row['year_built'] or 'Year unknown'}")
+        click.echo()
+
+    db.close()
+
+
 if __name__ == '__main__':
     cli()
