@@ -6,17 +6,18 @@ Computes:
 - Year-over-year percentage change
 - Outpacing metrics (% and $ spreads)
 - Sample size validation with automatic fallbacks
+- Supports area_sqm and street_name filters from config
 """
 
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 
 from tracker.db import Database
-from tracker.compute.segments import SEGMENTS, get_segment
+from tracker.compute.segments import SEGMENTS, Segment, get_segment
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class MetricResult:
     rolling_sample_3m: Optional[int]
     is_suppressed: bool = False
     suppression_reason: Optional[str] = None
+    display_name: Optional[str] = None  # For reports
+    filter_description: Optional[str] = None  # Description of applied filters
 
 
 def compute_median(prices: List[int]) -> Optional[int]:
@@ -71,6 +74,12 @@ def get_period_sales(
     """
     Get sale prices for a segment within a date range.
 
+    Applies all segment filters including:
+    - Suburb matching
+    - Property type matching
+    - Area (sqm) range if specified
+    - Street name filter if specified
+
     Args:
         db: Database connection
         segment_code: Segment to query
@@ -97,8 +106,24 @@ def get_period_sales(
           AND purchase_price > 0
     """
 
-    params = tuple(suburbs) + (segment.property_type, start_date.isoformat(), end_date.isoformat())
-    rows = db.query(query, params)
+    params: List = list(suburbs) + [segment.property_type, start_date.isoformat(), end_date.isoformat()]
+
+    # Add area filter if specified
+    if segment.area_min is not None:
+        query += " AND area_sqm >= ?"
+        params.append(segment.area_min)
+    if segment.area_max is not None:
+        query += " AND area_sqm <= ?"
+        params.append(segment.area_max)
+
+    # Add street filter if specified
+    if segment.streets:
+        street_list = list(segment.streets)
+        street_placeholders = ','.join(['?' for _ in street_list])
+        query += f" AND LOWER(street_name) IN ({street_placeholders})"
+        params.extend(street_list)
+
+    rows = db.query(query, tuple(params))
 
     return [row['purchase_price'] for row in rows]
 
@@ -126,6 +151,8 @@ def compute_segment_metrics(
     Returns:
         MetricResult with computed values or suppression
     """
+    segment = get_segment(segment_code)
+
     # Try monthly first
     monthly_start = reference_date.replace(day=1)
     monthly_end = reference_date
@@ -135,7 +162,7 @@ def compute_segment_metrics(
     if len(prices) >= min_sample_monthly:
         return _compute_with_period(
             db, segment_code, monthly_start, monthly_end,
-            prices, 'monthly', reference_date
+            prices, 'monthly', reference_date, segment
         )
 
     # Fallback to quarterly
@@ -145,7 +172,7 @@ def compute_segment_metrics(
     if len(prices) >= min_sample_quarterly:
         return _compute_with_period(
             db, segment_code, quarterly_start, monthly_end,
-            prices, 'quarterly', reference_date
+            prices, 'quarterly', reference_date, segment
         )
 
     # Fallback to 6-month
@@ -155,7 +182,7 @@ def compute_segment_metrics(
     if len(prices) >= min_sample_6month:
         return _compute_with_period(
             db, segment_code, sixmonth_start, monthly_end,
-            prices, '6month', reference_date
+            prices, '6month', reference_date, segment
         )
 
     # Suppress if still insufficient
@@ -171,6 +198,8 @@ def compute_segment_metrics(
         rolling_sample_3m=None,
         is_suppressed=True,
         suppression_reason=f"Insufficient sample size: {len(prices)} < {min_sample_6month}",
+        display_name=segment.display_name if segment else segment_code,
+        filter_description=segment.get_filter_description() if segment else None,
     )
 
 
@@ -182,6 +211,7 @@ def _compute_with_period(
     prices: List[int],
     period_type: str,
     reference_date: date,
+    segment: Optional[Segment] = None,
 ) -> MetricResult:
     """Compute full metrics for a valid period."""
     median = compute_median(prices)
@@ -211,6 +241,8 @@ def _compute_with_period(
         rolling_sample_3m=len(rolling_prices),
         is_suppressed=False,
         suppression_reason=None,
+        display_name=segment.display_name if segment else segment_code,
+        filter_description=segment.get_filter_description() if segment else None,
     )
 
 
@@ -231,10 +263,16 @@ def compute_outpacing_metrics(
     result = {
         'proxy_segment': proxy_metrics.segment,
         'target_segment': target_metrics.segment,
+        'proxy_display_name': proxy_metrics.display_name,
+        'target_display_name': target_metrics.display_name,
         'pct_spread': None,
         'dollar_spread': None,
         'proxy_yoy': proxy_metrics.yoy_pct,
         'target_yoy': target_metrics.yoy_pct,
+        'proxy_median': proxy_metrics.median_price,
+        'target_median': target_metrics.median_price,
+        'proxy_change': None,
+        'target_change': None,
         'is_outpacing': None,
     }
 
@@ -243,16 +281,16 @@ def compute_outpacing_metrics(
         result['pct_spread'] = round(proxy_metrics.yoy_pct - target_metrics.yoy_pct, 1)
         result['is_outpacing'] = result['pct_spread'] > 0
 
-    # Dollar spread (change in proxy value vs change in target value)
-    if (proxy_metrics.median_price is not None and
-        target_metrics.median_price is not None and
-        proxy_metrics.yoy_pct is not None and
-        target_metrics.yoy_pct is not None):
+    # Dollar change calculations
+    if proxy_metrics.median_price is not None and proxy_metrics.yoy_pct is not None:
+        result['proxy_change'] = int(proxy_metrics.median_price * (proxy_metrics.yoy_pct / 100))
 
-        # Approximate dollar change based on YoY %
-        proxy_change = int(proxy_metrics.median_price * (proxy_metrics.yoy_pct / 100))
-        target_change = int(target_metrics.median_price * (target_metrics.yoy_pct / 100))
-        result['dollar_spread'] = proxy_change - target_change
+    if target_metrics.median_price is not None and target_metrics.yoy_pct is not None:
+        result['target_change'] = int(target_metrics.median_price * (target_metrics.yoy_pct / 100))
+
+    # Dollar spread
+    if result['proxy_change'] is not None and result['target_change'] is not None:
+        result['dollar_spread'] = result['proxy_change'] - result['target_change']
 
     return result
 
@@ -278,10 +316,6 @@ def compute_all_metrics(
 
     results = {}
     for segment_code in SEGMENTS:
-        # Skip 211 comp basket (requires metadata)
-        if segment_code == 'wollstonecraft_211':
-            continue
-
         results[segment_code] = compute_segment_metrics(
             db,
             segment_code,

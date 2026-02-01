@@ -1,7 +1,9 @@
 # PropertyTracker Configuration
 # Copy to config.yml and fill in your values
 
-# Personal financial inputs
+# ===================
+# PERSONAL FINANCIAL INPUTS
+# ===================
 savings:
   current_balance: 150000
   monthly_contribution: 5000
@@ -21,12 +23,90 @@ investment_property:
     base: 0.95
     bull: 1.00
 
-# Target markets
-targets:
-  primary: "lane_cove_houses"
-  secondary: "chatswood_houses"
+# ===================
+# SEGMENT DEFINITIONS
+# ===================
+# Define market segments to track. Each segment has:
+# - display_name: Human-readable name shown in reports
+# - suburbs: List of suburbs (lowercase) to include
+# - property_type: 'house' or 'unit'
+# - role: 'proxy' (your assets) or 'target' (what you want to buy)
+# - filters: Optional filters for area_min/area_max (sqm) and streets
+# - description: Optional explanation shown in reports
 
-# Data source
+segments:
+  # Your Properties (Proxies)
+  revesby_houses:
+    display_name: "Revesby Houses (IP)"
+    suburbs: [revesby, revesby heights]
+    property_type: house
+    role: proxy
+    filters:
+      area_min: 500  # sqm - matches your IP land size
+      area_max: 600
+    description: "500-600sqm land, comparable to your IP"
+
+  wollstonecraft_units:
+    display_name: "Wollstonecraft Units (PPOR)"
+    suburbs: [wollstonecraft]
+    property_type: unit
+    role: proxy
+    filters:
+      streets: [lamont st, milner cres, shirley rd]  # Streets near your unit
+    description: "Units near Lamont St, comparable to your PPOR"
+
+  # Target Markets (Houses only)
+  lane_cove_houses:
+    display_name: "Lane Cove Houses"
+    suburbs: [lane cove, lane cove north, lane cove west]
+    property_type: house
+    role: target
+    description: "Primary target - forever home"
+
+  chatswood_houses:
+    display_name: "Chatswood Houses"
+    suburbs: [chatswood, chatswood west]
+    property_type: house
+    role: target
+    description: "Alternative target"
+
+# ===================
+# GAP TRACKER CONFIG
+# ===================
+# Defines how to calculate if your combined assets are catching up to target
+
+gap_tracker:
+  # Which segments contribute to your purchasing power?
+  # These are summed to calculate combined asset growth
+  proxy_segments:
+    - revesby_houses       # IP equity
+    - wollstonecraft_units # PPOR sale proceeds
+
+  # Which segment is your primary target?
+  target_segment: lane_cove_houses
+
+  # Secondary comparison (optional, for context)
+  secondary_target: chatswood_houses
+
+# ===================
+# REPORT DISPLAY
+# ===================
+report:
+  # What to show in "Your Properties" section
+  show_proxies: [revesby_houses, wollstonecraft_units]
+
+  # What to show in "Target Markets" section
+  show_targets: [lane_cove_houses, chatswood_houses]
+
+  # Add inline explanations of what each segment means?
+  include_explanations: true
+
+  # Report title
+  title: "PropertyTracker Report"
+
+# ===================
+# DATA SOURCE
+# ===================
 data:
   source: "nswpropertysalesdata"
   districts:
@@ -35,11 +115,15 @@ data:
     - 87   # Lane Cove
     - 145  # Willoughby (Chatswood)
 
-# Alerting
+# ===================
+# ALERTING
+# ===================
 telegram:
   enabled: true
 
-# Thresholds
+# ===================
+# THRESHOLDS
+# ===================
 thresholds:
   min_sample_monthly: 3
   min_sample_quarterly: 5
@@ -48,6 +132,16 @@ thresholds:
   outlier_low_pct: 50
   outlier_high_pct: 200
 
-# Purchase costs (legal fees, conveyancing, etc.)
+# ===================
+# PURCHASE COSTS
+# ===================
+# Legal fees, conveyancing, inspections, etc.
 purchase_costs:
   rate: 0.01  # 1% of purchase price (default)
+
+# ===================
+# SCHEDULE
+# ===================
+schedule:
+  frequency: fortnightly  # monthly | fortnightly | weekly
+  timezone: Australia/Sydney

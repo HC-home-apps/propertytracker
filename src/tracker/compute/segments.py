@@ -1,92 +1,164 @@
 # src/tracker/compute/segments.py
 """Market segment definitions for PropertyTracker.
 
-Defines the market segments we track:
-1. revesby_houses - Houses in Revesby (proxy for 11 Alliance Ave equity)
-2. wollstonecraft_units - All units in Wollstonecraft
-3. wollstonecraft_211 - 2/1/1 units in Wollstonecraft (comp basket)
-4. lane_cove_houses - Houses in Lane Cove (target market)
-5. lane_cove_units - Units in Lane Cove
-6. chatswood_houses - Houses in Chatswood (target market)
-7. chatswood_units - Units in Chatswood
+Supports two modes:
+1. Config-driven: Load segments from config.yml with area/street filters
+2. Fallback: Use default hardcoded segments for backward compatibility
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from dataclasses import dataclass, field
+from typing import Dict, FrozenSet, List, Optional, Set
 
 
 @dataclass(frozen=True)
 class Segment:
-    """Market segment definition."""
+    """Market segment definition with optional filters."""
 
-    code: str                    # Unique segment code
-    name: str                    # Human-readable name
-    suburbs: Set[str]            # Suburbs included (lowercase)
-    property_type: str           # 'house' or 'unit'
-    is_target: bool = False      # Is this a target market we're buying into?
-    is_proxy: bool = False       # Is this a proxy for a specific property?
-    description: str = ""        # Additional context
+    code: str                           # Unique segment code
+    display_name: str                   # Human-readable name for reports
+    suburbs: FrozenSet[str]             # Suburbs included (lowercase)
+    property_type: str                  # 'house' or 'unit'
+    role: str                           # 'proxy' or 'target'
+    description: str = ""               # Explanation shown in reports
+    area_min: Optional[int] = None      # Min land area filter (sqm)
+    area_max: Optional[int] = None      # Max land area filter (sqm)
+    streets: Optional[FrozenSet[str]] = None  # Street name filter (lowercase)
+
+    @property
+    def is_proxy(self) -> bool:
+        """Is this a proxy segment (your assets)?"""
+        return self.role == 'proxy'
+
+    @property
+    def is_target(self) -> bool:
+        """Is this a target market segment?"""
+        return self.role == 'target'
+
+    @property
+    def has_filters(self) -> bool:
+        """Does this segment have area or street filters?"""
+        return self.area_min is not None or self.area_max is not None or self.streets is not None
+
+    def get_filter_description(self) -> Optional[str]:
+        """Get human-readable filter description for reports."""
+        parts = []
+        if self.area_min is not None or self.area_max is not None:
+            if self.area_min and self.area_max:
+                parts.append(f"{self.area_min}-{self.area_max}sqm land")
+            elif self.area_min:
+                parts.append(f"≥{self.area_min}sqm land")
+            elif self.area_max:
+                parts.append(f"≤{self.area_max}sqm land")
+        if self.streets:
+            street_list = '/'.join(sorted(s.title() for s in self.streets))
+            parts.append(f"{street_list} streets")
+        return ', '.join(parts) if parts else None
 
 
-# Define all tracked segments
-SEGMENTS: Dict[str, Segment] = {
-    'revesby_houses': Segment(
-        code='revesby_houses',
-        name='Revesby Houses',
-        suburbs={'revesby', 'revesby heights'},
-        property_type='house',
-        is_proxy=True,
-        description='Proxy for 11 Alliance Ave equity release capacity',
-    ),
-    'wollstonecraft_units': Segment(
-        code='wollstonecraft_units',
-        name='Wollstonecraft Units',
-        suburbs={'wollstonecraft'},
-        property_type='unit',
-        is_proxy=True,
-        description='Proxy for PPOR sale value (all units)',
-    ),
-    'wollstonecraft_211': Segment(
-        code='wollstonecraft_211',
-        name='Wollstonecraft 2/1/1 (Above Average)',
-        suburbs={'wollstonecraft'},
-        property_type='unit',
-        is_proxy=True,
-        description='Comp basket: 2bed/1bath/1car above-average quality',
-    ),
-    'lane_cove_houses': Segment(
-        code='lane_cove_houses',
-        name='Lane Cove Houses',
-        suburbs={'lane cove', 'lane cove north', 'lane cove west'},
-        property_type='house',
-        is_target=True,
-        description='Target market - houses',
-    ),
-    'lane_cove_units': Segment(
-        code='lane_cove_units',
-        name='Lane Cove Units',
-        suburbs={'lane cove', 'lane cove north', 'lane cove west'},
-        property_type='unit',
-        is_target=True,
-        description='Target market - units',
-    ),
-    'chatswood_houses': Segment(
-        code='chatswood_houses',
-        name='Chatswood Houses',
-        suburbs={'chatswood', 'chatswood west'},
-        property_type='house',
-        is_target=True,
-        description='Target market - houses',
-    ),
-    'chatswood_units': Segment(
-        code='chatswood_units',
-        name='Chatswood Units',
-        suburbs={'chatswood', 'chatswood west'},
-        property_type='unit',
-        is_target=True,
-        description='Target market - units',
-    ),
-}
+def load_segments_from_config(config: dict) -> Dict[str, Segment]:
+    """
+    Load segment definitions from config dictionary.
+
+    Args:
+        config: Parsed config.yml dictionary
+
+    Returns:
+        Dict mapping segment codes to Segment objects
+    """
+    segments_config = config.get('segments', {})
+    if not segments_config:
+        return get_default_segments()
+
+    segments = {}
+    for code, seg_config in segments_config.items():
+        # Parse suburbs
+        suburbs_list = seg_config.get('suburbs', [])
+        suburbs = frozenset(s.lower().strip() for s in suburbs_list)
+
+        # Parse filters
+        filters = seg_config.get('filters', {})
+        area_min = filters.get('area_min')
+        area_max = filters.get('area_max')
+        streets_list = filters.get('streets', [])
+        streets = frozenset(s.lower().strip() for s in streets_list) if streets_list else None
+
+        segment = Segment(
+            code=code,
+            display_name=seg_config.get('display_name', code),
+            suburbs=suburbs,
+            property_type=seg_config.get('property_type', 'house'),
+            role=seg_config.get('role', 'target'),
+            description=seg_config.get('description', ''),
+            area_min=area_min,
+            area_max=area_max,
+            streets=streets,
+        )
+        segments[code] = segment
+
+    return segments
+
+
+def get_default_segments() -> Dict[str, Segment]:
+    """
+    Get default hardcoded segments for backward compatibility.
+
+    Used when config.yml doesn't define segments.
+    """
+    return {
+        'revesby_houses': Segment(
+            code='revesby_houses',
+            display_name='Revesby Houses',
+            suburbs=frozenset({'revesby', 'revesby heights'}),
+            property_type='house',
+            role='proxy',
+            description='Proxy for 11 Alliance Ave equity release capacity',
+        ),
+        'wollstonecraft_units': Segment(
+            code='wollstonecraft_units',
+            display_name='Wollstonecraft Units',
+            suburbs=frozenset({'wollstonecraft'}),
+            property_type='unit',
+            role='proxy',
+            description='Proxy for PPOR sale value (all units)',
+        ),
+        'lane_cove_houses': Segment(
+            code='lane_cove_houses',
+            display_name='Lane Cove Houses',
+            suburbs=frozenset({'lane cove', 'lane cove north', 'lane cove west'}),
+            property_type='house',
+            role='target',
+            description='Target market - houses',
+        ),
+        'chatswood_houses': Segment(
+            code='chatswood_houses',
+            display_name='Chatswood Houses',
+            suburbs=frozenset({'chatswood', 'chatswood west'}),
+            property_type='house',
+            role='target',
+            description='Target market - houses',
+        ),
+    }
+
+
+# Global segments dict - populated at runtime from config or defaults
+SEGMENTS: Dict[str, Segment] = get_default_segments()
+
+
+def init_segments(config: dict) -> Dict[str, Segment]:
+    """
+    Initialize segments from config and update global SEGMENTS.
+
+    Call this at startup after loading config.yml.
+
+    Args:
+        config: Parsed config.yml dictionary
+
+    Returns:
+        Dict of loaded segments
+    """
+    global SEGMENTS
+    SEGMENTS = load_segments_from_config(config)
+    return SEGMENTS
 
 
 def get_segment(code: str) -> Optional[Segment]:
@@ -99,7 +171,10 @@ def get_segment_for_sale(
     property_type: str,
 ) -> Optional[str]:
     """
-    Determine which segment a sale belongs to.
+    Determine which segment a sale belongs to (basic match only).
+
+    Note: This does NOT check area/street filters - those are applied
+    at query time in metrics.py for performance.
 
     Args:
         suburb: Suburb name (case-insensitive)
@@ -111,10 +186,6 @@ def get_segment_for_sale(
     suburb_lower = suburb.lower().strip()
 
     for code, segment in SEGMENTS.items():
-        # Skip the 211 comp basket (requires metadata match)
-        if code == 'wollstonecraft_211':
-            continue
-
         if suburb_lower in segment.suburbs and segment.property_type == property_type:
             return code
 
@@ -122,7 +193,7 @@ def get_segment_for_sale(
 
 
 def get_proxy_segments() -> List[Segment]:
-    """Get segments that are proxies (IP and PPOR)."""
+    """Get segments that are proxies (your assets)."""
     return [s for s in SEGMENTS.values() if s.is_proxy]
 
 
@@ -137,7 +208,7 @@ def is_in_segment(
     segment_code: str,
 ) -> bool:
     """
-    Check if a property belongs to a specific segment.
+    Check if a property belongs to a specific segment (basic match only).
 
     Args:
         suburb: Suburb name
@@ -145,7 +216,7 @@ def is_in_segment(
         segment_code: Segment to check
 
     Returns:
-        True if property matches segment criteria
+        True if property matches segment criteria (excluding area/street filters)
     """
     segment = SEGMENTS.get(segment_code)
     if not segment:
@@ -166,21 +237,42 @@ def get_all_tracked_suburbs() -> Set[str]:
     return suburbs
 
 
-def get_outpacing_pairs() -> List[tuple]:
+def get_outpacing_pairs(config: Optional[dict] = None) -> List[tuple]:
     """
     Get pairs of (proxy_segment, target_segment) for outpacing comparison.
+
+    If config has gap_tracker section, uses that. Otherwise falls back
+    to comparing each proxy against each target.
+
+    Args:
+        config: Optional config dict with gap_tracker section
 
     Returns:
         List of (proxy_code, target_code) tuples
     """
+    if config and 'gap_tracker' in config:
+        gap_config = config['gap_tracker']
+        proxy_codes = gap_config.get('proxy_segments', [])
+        target_code = gap_config.get('target_segment')
+        secondary = gap_config.get('secondary_target')
+
+        pairs = []
+        for proxy_code in proxy_codes:
+            if target_code:
+                pairs.append((proxy_code, target_code))
+            if secondary:
+                pairs.append((proxy_code, secondary))
+        return pairs
+
+    # Fallback: all proxies vs all targets
     pairs = []
+    proxies = get_proxy_segments()
+    targets = get_target_segments()
 
-    # Compare Revesby houses against target houses
-    for target_code in ['lane_cove_houses', 'chatswood_houses']:
-        pairs.append(('revesby_houses', target_code))
-
-    # Compare Wollstonecraft units against target units
-    for target_code in ['lane_cove_units', 'chatswood_units']:
-        pairs.append(('wollstonecraft_units', target_code))
+    for proxy in proxies:
+        for target in targets:
+            # Only compare same property types
+            if proxy.property_type == target.property_type:
+                pairs.append((proxy.code, target.code))
 
     return pairs

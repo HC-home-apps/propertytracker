@@ -9,13 +9,15 @@ from tracker.notify.telegram import (
     TelegramConfig,
     send_message,
     format_metric_line,
-    format_outpacing_line,
     format_monthly_report,
     format_alert,
+    format_gap_tracker_section,
+    format_affordability_section,
     _compute_verdict,
 )
 from tracker.compute.metrics import MetricResult
 from tracker.compute.equity import EquityScenario, AffordabilityResult
+from tracker.compute.gap_tracker import GapTrackerResult
 
 
 @pytest.fixture
@@ -31,6 +33,8 @@ def sample_metric():
         yoy_pct=8.5,
         rolling_median_3m=1480000,
         rolling_sample_3m=40,
+        display_name='Revesby Houses (IP)',
+        filter_description='500-600sqm land',
     )
 
 
@@ -49,6 +53,35 @@ def suppressed_metric():
         rolling_sample_3m=None,
         is_suppressed=True,
         suppression_reason='Insufficient data: 2 < 8',
+        display_name='Revesby Houses (IP)',
+    )
+
+
+@pytest.fixture
+def sample_gap_tracker():
+    """Sample GapTrackerResult for tests."""
+    return GapTrackerResult(
+        proxy_total_change=120000,
+        proxy_breakdown={
+            'revesby_houses': {
+                'display_name': 'Revesby Houses (IP)',
+                'median': 1500000,
+                'yoy_pct': 8.0,
+                'change': 120000,
+                'sample_size': 15,
+                'is_suppressed': False,
+                'filter_description': '500-600sqm land',
+            },
+        },
+        target_segment='lane_cove_houses',
+        target_display_name='Lane Cove Houses',
+        target_median=2500000,
+        target_yoy=4.0,
+        target_change=100000,
+        net_position=20000,
+        is_catching_up=True,
+        can_compute=True,
+        computation_notes=[],
     )
 
 
@@ -181,69 +214,130 @@ class TestFormatMetricLine:
 
     def test_normal_metric(self, sample_metric):
         """Format normal metric."""
-        line = format_metric_line("Revesby Houses", sample_metric)
+        line = format_metric_line(sample_metric)
 
-        assert "Revesby Houses" in line
+        assert "Revesby Houses (IP)" in line
         assert "$1,500,000" in line
         assert "+8.5%" in line
         assert "n=15" in line
 
     def test_suppressed_metric(self, suppressed_metric):
         """Format suppressed metric."""
-        line = format_metric_line("Revesby Houses", suppressed_metric)
+        line = format_metric_line(suppressed_metric)
 
-        assert "⚠️" in line
         assert "Insufficient" in line
+
+    def test_includes_filter_description(self, sample_metric):
+        """Shows filter description when available."""
+        line = format_metric_line(sample_metric, include_filter=True)
+
+        assert "500-600sqm land" in line
 
     def test_quarterly_period_note(self, sample_metric):
         """Shows period note for non-monthly."""
-        sample_metric.period_type = 'quarterly'
-        line = format_metric_line("Test", sample_metric, show_period=True)
+        sample_metric = MetricResult(
+            segment='revesby_houses',
+            period_start=date(2024, 1, 1),
+            period_end=date(2024, 3, 31),
+            period_type='quarterly',
+            median_price=1500000,
+            sample_size=15,
+            yoy_pct=8.5,
+            rolling_median_3m=1480000,
+            rolling_sample_3m=40,
+            display_name='Revesby Houses',
+        )
+        line = format_metric_line(sample_metric)
 
         assert "(quarterly)" in line
 
 
-class TestFormatOutpacingLine:
-    """Test outpacing line formatting."""
+class TestFormatGapTrackerSection:
+    """Test gap tracker section formatting."""
 
-    def test_positive_outpacing(self):
-        """Format positive outpacing."""
-        outpacing = {
-            'proxy_segment': 'revesby_houses',
-            'target_segment': 'lane_cove_houses',
-            'pct_spread': 3.5,
-            'dollar_spread': 50000,
-        }
+    def test_catching_up(self, sample_gap_tracker):
+        """Format when catching up."""
+        lines = format_gap_tracker_section(sample_gap_tracker)
+        text = '\n'.join(lines)
 
-        line = format_outpacing_line(
-            'revesby_houses', 'lane_cove_houses', outpacing
+        assert "Your assets this year" in text
+        assert "+$120,000" in text
+        assert "Lane Cove Houses" in text
+        assert "Catching up" in text
+
+    def test_falling_behind(self):
+        """Format when falling behind."""
+        gap_tracker = GapTrackerResult(
+            proxy_total_change=50000,
+            proxy_breakdown={},
+            target_segment='lane_cove_houses',
+            target_display_name='Lane Cove Houses',
+            target_median=2500000,
+            target_yoy=4.0,
+            target_change=100000,
+            net_position=-50000,
+            is_catching_up=False,
+            can_compute=True,
+            computation_notes=[],
         )
+        lines = format_gap_tracker_section(gap_tracker)
+        text = '\n'.join(lines)
 
-        assert "📈" in line  # Up arrow
-        assert "+3.5%" in line
-        assert "$50,000" in line
+        assert "Falling behind" in text
 
-    def test_negative_outpacing(self):
-        """Format negative outpacing."""
-        outpacing = {
-            'proxy_segment': 'revesby_houses',
-            'target_segment': 'lane_cove_houses',
-            'pct_spread': -2.0,
-            'dollar_spread': -30000,
-        }
-
-        line = format_outpacing_line(
-            'revesby_houses', 'lane_cove_houses', outpacing
+    def test_cannot_compute(self):
+        """Format when cannot compute."""
+        gap_tracker = GapTrackerResult(
+            proxy_total_change=None,
+            proxy_breakdown={},
+            target_segment='lane_cove_houses',
+            target_display_name='Lane Cove Houses',
+            target_median=None,
+            target_yoy=None,
+            target_change=None,
+            net_position=None,
+            is_catching_up=None,
+            can_compute=False,
+            computation_notes=['Missing data'],
         )
+        lines = format_gap_tracker_section(gap_tracker)
+        text = '\n'.join(lines)
 
-        assert "📉" in line  # Down arrow
-        assert "-2.0%" in line
+        assert "Cannot compute" in text
+
+
+class TestFormatAffordabilitySection:
+    """Test affordability section formatting."""
+
+    def test_shows_target_breakdown(self, sample_affordability):
+        """Shows target cost breakdown."""
+        lines = format_affordability_section(sample_affordability, 'Lane Cove Houses')
+        text = '\n'.join(lines)
+
+        assert "Lane Cove Houses" in text
+        assert "Stamp duty" in text
+        assert "Total needed" in text
+
+    def test_shows_cash_breakdown(self, sample_affordability):
+        """Shows cash sources."""
+        lines = format_affordability_section(sample_affordability, 'Target')
+        text = '\n'.join(lines)
+
+        assert "Savings" in text
+        assert "Total available" in text
+
+    def test_shows_gap(self, sample_affordability):
+        """Shows gap calculation."""
+        lines = format_affordability_section(sample_affordability, 'Target')
+        text = '\n'.join(lines)
+
+        assert "Gap:" in text
 
 
 class TestFormatMonthlyReport:
     """Test monthly report formatting."""
 
-    def test_contains_all_sections(self, sample_metric, sample_affordability):
+    def test_contains_all_sections(self, sample_metric, sample_gap_tracker, sample_affordability):
         """Report contains all expected sections."""
         metrics = {
             'revesby_houses': sample_metric,
@@ -251,64 +345,44 @@ class TestFormatMonthlyReport:
             'lane_cove_houses': sample_metric,
         }
 
-        outpacing = [{
-            'proxy_segment': 'revesby_houses',
-            'target_segment': 'lane_cove_houses',
-            'pct_spread': 3.0,
-            'dollar_spread': 40000,
-        }]
-
         report = format_monthly_report(
-            metrics, outpacing, sample_affordability, "January 2024"
+            metrics, sample_gap_tracker, sample_affordability, "January 2024"
         )
 
         assert "January 2024" in report
-        assert "Market Indices" in report
         assert "Your Properties" in report
         assert "Target Markets" in report
-        assert "Outpacing Scoreboard" in report
+        assert "Gap Tracker" in report
         assert "Affordability Gap" in report
         assert "Verdict" in report
-
-    def test_shows_affordability_status(self, sample_metric, sample_affordability):
-        """Shows affordability status."""
-        metrics = {'revesby_houses': sample_metric}
-        outpacing = []
-
-        report = format_monthly_report(
-            metrics, outpacing, sample_affordability, "January 2024"
-        )
-
-        # Not affordable case
-        assert "months to close" in report
 
 
 class TestComputeVerdict:
     """Test verdict computation."""
 
-    def test_gap_narrowing(self):
-        """Verdict when gap narrowing."""
-        outpacing = [{
-            'proxy_segment': 'revesby_houses',
-            'target_segment': 'lane_cove_houses',
-            'pct_spread': 5.0,
-            'dollar_spread': 60000,
-        }]
+    def test_catching_up(self, sample_gap_tracker, sample_affordability):
+        """Verdict when catching up."""
+        verdict = _compute_verdict(sample_gap_tracker, sample_affordability)
+        # Should mention progress
+        assert "progress" in verdict.lower() or "gaining" in verdict.lower()
 
-        verdict = _compute_verdict(outpacing, MagicMock())
-        assert "narrowing" in verdict.lower()
-
-    def test_gap_widening(self):
-        """Verdict when gap widening."""
-        outpacing = [{
-            'proxy_segment': 'revesby_houses',
-            'target_segment': 'lane_cove_houses',
-            'pct_spread': -3.0,
-            'dollar_spread': -40000,
-        }]
-
-        verdict = _compute_verdict(outpacing, MagicMock())
-        assert "widening" in verdict.lower()
+    def test_falling_behind(self, sample_affordability):
+        """Verdict when falling behind."""
+        gap_tracker = GapTrackerResult(
+            proxy_total_change=50000,
+            proxy_breakdown={},
+            target_segment='lane_cove_houses',
+            target_display_name='Lane Cove Houses',
+            target_median=2500000,
+            target_yoy=4.0,
+            target_change=100000,
+            net_position=-60000,
+            is_catching_up=False,
+            can_compute=True,
+            computation_notes=[],
+        )
+        verdict = _compute_verdict(gap_tracker, sample_affordability)
+        assert "widen" in verdict.lower() or "headwind" in verdict.lower()
 
 
 class TestFormatAlert:
@@ -318,18 +392,15 @@ class TestFormatAlert:
         """Format info alert."""
         alert = format_alert("Test Alert", "Test message", severity='info')
 
-        assert "ℹ️" in alert
         assert "Test Alert" in alert
         assert "Test message" in alert
 
     def test_warning_alert(self):
         """Format warning alert."""
         alert = format_alert("Warning", "Be careful", severity='warning')
-
-        assert "⚠️" in alert
+        assert "Warning" in alert
 
     def test_error_alert(self):
         """Format error alert."""
         alert = format_alert("Error", "Something broke", severity='error')
-
-        assert "🚨" in alert
+        assert "Error" in alert

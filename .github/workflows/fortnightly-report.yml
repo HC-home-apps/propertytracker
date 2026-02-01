@@ -1,10 +1,10 @@
-name: Monthly PropertyTracker Report
+name: Fortnightly PropertyTracker Report
 
 on:
-  # Monthly schedule: 1st of each month at 9 AM AEST (23:00 UTC previous day)
-  # Using 23:00 UTC on last day of month to account for AEST timezone
+  # Fortnightly schedule: 1st and 15th of each month at 9 AM AEST (23:00 UTC previous day)
   schedule:
-    - cron: '0 23 28-31 * *'  # Run on 28th-31st at 23:00 UTC
+    - cron: '0 23 1 * *'   # 1st of month at 23:00 UTC (9am AEST next day)
+    - cron: '0 23 15 * *'  # 15th of month at 23:00 UTC (9am AEST next day)
 
   # Manual trigger with options
   workflow_dispatch:
@@ -28,16 +28,6 @@ jobs:
   run-tracker:
     runs-on: ubuntu-latest
 
-    # Only run scheduled job on the last day of the month
-    # For manual runs, always run
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'schedule' &&
-       (day(github.run_started_at) == 28 ||
-        day(github.run_started_at) == 29 ||
-        day(github.run_started_at) == 30 ||
-        day(github.run_started_at) == 31))
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -60,6 +50,7 @@ jobs:
           cat > config.yml << 'EOF'
           # PropertyTracker Configuration (GitHub Actions)
           # Financial values loaded from environment variables at runtime
+
           savings:
             current_balance: 0
             monthly_contribution: 0
@@ -77,9 +68,53 @@ jobs:
               base: 0.95
               bull: 1.00
 
-          targets:
-            primary: lane_cove_houses
-            secondary: chatswood_houses
+          # Segment definitions with filters
+          segments:
+            revesby_houses:
+              display_name: "Revesby Houses (IP)"
+              suburbs: [revesby, revesby heights]
+              property_type: house
+              role: proxy
+              filters:
+                area_min: 500
+                area_max: 600
+              description: "500-600sqm land, comparable to your IP"
+
+            wollstonecraft_units:
+              display_name: "Wollstonecraft Units (PPOR)"
+              suburbs: [wollstonecraft]
+              property_type: unit
+              role: proxy
+              filters:
+                streets: [lamont, milner, wollstonecraft]
+              description: "Units near Lamont St, comparable to your PPOR"
+
+            lane_cove_houses:
+              display_name: "Lane Cove Houses"
+              suburbs: [lane cove, lane cove north, lane cove west]
+              property_type: house
+              role: target
+              description: "Primary target - forever home"
+
+            chatswood_houses:
+              display_name: "Chatswood Houses"
+              suburbs: [chatswood, chatswood west]
+              property_type: house
+              role: target
+              description: "Alternative target"
+
+          gap_tracker:
+            proxy_segments:
+              - revesby_houses
+              - wollstonecraft_units
+            target_segment: lane_cove_houses
+            secondary_target: chatswood_houses
+
+          report:
+            show_proxies: [revesby_houses, wollstonecraft_units]
+            show_targets: [lane_cove_houses, chatswood_houses]
+            include_explanations: true
+            title: "PropertyTracker Report"
 
           data:
             source: nswpropertysalesdata
@@ -100,6 +135,10 @@ jobs:
 
           purchase_costs:
             rate: 0.01
+
+          schedule:
+            frequency: fortnightly
+            timezone: Australia/Sydney
           EOF
 
       - name: Create data directories
