@@ -52,20 +52,28 @@ def parse_csv_file(
         reader = csv.DictReader(f)
 
         for row in reader:
-            # Filter by district if specified
-            district_code = _safe_int(row.get('district_code', row.get('District Code', '')))
-            if districts and district_code not in districts:
+            # Filter by suburb (primary filter - district code not always present)
+            suburb = _get_field(row, ['Property locality', 'suburb', 'Suburb']).strip().lower()
+            if suburbs and suburb not in suburbs:
                 continue
 
-            # Filter by suburb if specified
-            suburb = row.get('suburb', row.get('Suburb', '')).strip().lower()
-            if suburbs and suburb not in suburbs:
+            # Filter by district if column exists and districts specified
+            district_code = _safe_int(_get_field(row, ['district_code', 'District Code']))
+            if districts and district_code and district_code not in districts:
                 continue
 
             # Parse and normalise the record
             record = _parse_row(row, file_path.name)
             if record:
                 yield record
+
+
+def _get_field(row: Dict, field_names: List[str], default: str = '') -> str:
+    """Get field value trying multiple possible column names."""
+    for name in field_names:
+        if name in row and row[name]:
+            return str(row[name])
+    return default
 
 
 def _parse_row(row: Dict, source_file: str) -> Optional[Dict]:
@@ -80,59 +88,62 @@ def _parse_row(row: Dict, source_file: str) -> Optional[Dict]:
         Normalised record dict or None if invalid
     """
     try:
-        # Handle different column name formats
-        dealing_number = row.get('dealing_number', row.get('Dealing Number', '')).strip()
+        # Handle different column name formats from nswpropertysalesdata.com
+        dealing_number = _get_field(row, ['Dealing number', 'dealing_number', 'Dealing Number']).strip()
         if not dealing_number:
             return None
 
         # Price validation
-        price_str = row.get('purchase_price', row.get('Purchase Price', '0'))
+        price_str = _get_field(row, ['Purchase price', 'purchase_price', 'Purchase Price'], '0')
         price = _safe_int(price_str)
-        if price <= 0 or price > 100_000_000:  # Sanity check
+        if price <= 0:
+            return None
+        if price > 100_000_000:  # Sanity check for data errors
+            logger.warning(f"Rejected sale {dealing_number}: price ${price:,} exceeds $100M threshold")
             return None
 
         # Date parsing
         contract_date = _parse_date(
-            row.get('contract_date', row.get('Contract Date', ''))
+            _get_field(row, ['Contract date', 'contract_date', 'Contract Date'])
         )
         if not contract_date:
             return None
 
         settlement_date = _parse_date(
-            row.get('settlement_date', row.get('Settlement Date', ''))
+            _get_field(row, ['Settlement date', 'settlement_date', 'Settlement Date'])
         )
 
         # Extract address components
-        unit_number = row.get('unit_number', row.get('Unit Number', '')).strip() or None
-        house_number = row.get('house_number', row.get('House Number', '')).strip()
-        street_name = row.get('street_name', row.get('Street Name', '')).strip()
-        suburb = row.get('suburb', row.get('Suburb', '')).strip()
-        postcode = row.get('postcode', row.get('Postcode', '')).strip()
+        unit_number = _get_field(row, ['Property unit number', 'unit_number', 'Unit Number']).strip() or None
+        house_number = _get_field(row, ['Property house number', 'house_number', 'House Number']).strip()
+        street_name = _get_field(row, ['Property street name', 'street_name', 'Street Name']).strip()
+        suburb = _get_field(row, ['Property locality', 'suburb', 'Suburb']).strip()
+        postcode = _get_field(row, ['Property post code', 'postcode', 'Postcode']).strip()
 
         # Property classification
-        strata_lot = row.get('strata_lot_number', row.get('Strata Lot Number', '')).strip()
-        nature = row.get('nature_of_property', row.get('Nature Of Property', '')).strip()
+        strata_lot = _get_field(row, ['Strata lot number', 'strata_lot_number', 'Strata Lot Number']).strip()
+        nature = _get_field(row, ['Nature of property', 'nature_of_property', 'Nature Of Property']).strip()
 
         # Determine property type
         property_type = classify_property_type(strata_lot, nature)
 
         return {
             'dealing_number': dealing_number,
-            'property_id': row.get('property_id', row.get('Property ID', '')).strip(),
+            'property_id': _get_field(row, ['Property ID', 'property_id']).strip(),
             'unit_number': unit_number,
             'house_number': house_number,
             'street_name': street_name,
             'suburb': suburb,
             'postcode': postcode,
-            'area_sqm': _safe_float(row.get('area', row.get('Area', ''))),
-            'zone_code': row.get('zone_code', row.get('Zone Code', '')).strip(),
+            'area_sqm': _safe_float(_get_field(row, ['Area', 'area'])),
+            'zone_code': _get_field(row, ['Zoning', 'zone_code', 'Zone Code']).strip(),
             'nature_of_property': nature,
             'strata_lot_number': strata_lot if strata_lot else None,
             'contract_date': contract_date,
             'settlement_date': settlement_date,
             'purchase_price': price,
             'property_type': property_type,
-            'district_code': _safe_int(row.get('district_code', row.get('District Code', ''))),
+            'district_code': _safe_int(_get_field(row, ['district_code', 'District Code'])),
             'source_file': source_file,
         }
 

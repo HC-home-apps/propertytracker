@@ -53,21 +53,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Create config from secrets
+      - name: Create config file
         run: |
+          # Financial values are loaded from environment variables (SAVINGS_BALANCE,
+          # SAVINGS_MONTHLY, PPOR_DEBT, IP_DEBT) - not written to files for security
           cat > config.yml << 'EOF'
-          # PropertyTracker Configuration (from GitHub Secrets)
+          # PropertyTracker Configuration (GitHub Actions)
+          # Financial values loaded from environment variables at runtime
           savings:
-            current_balance: ${{ secrets.SAVINGS_BALANCE }}
-            monthly_contribution: ${{ secrets.SAVINGS_MONTHLY }}
+            current_balance: 0
+            monthly_contribution: 0
 
           ppor:
-            debt: ${{ secrets.PPOR_DEBT }}
+            debt: 0
             selling_cost_rate: 0.02
 
           investment_property:
             address: "11 Alliance Ave, Revesby NSW 2212"
-            debt: ${{ secrets.IP_DEBT }}
+            debt: 0
             refinance_lvr_cap: 0.80
             valuation_haircut:
               bear: 0.90
@@ -94,6 +97,9 @@ jobs:
             min_sample_quarterly: 5
             min_sample_6month: 8
             gap_alert_threshold: 20000
+
+          purchase_costs:
+            rate: 0.01
           EOF
 
       - name: Create data directories
@@ -112,6 +118,10 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SAVINGS_BALANCE: ${{ secrets.SAVINGS_BALANCE }}
+          SAVINGS_MONTHLY: ${{ secrets.SAVINGS_MONTHLY }}
+          PPOR_DEBT: ${{ secrets.PPOR_DEBT }}
+          IP_DEBT: ${{ secrets.IP_DEBT }}
         run: |
           FORCE_FLAG=""
           DRY_RUN_FLAG=""

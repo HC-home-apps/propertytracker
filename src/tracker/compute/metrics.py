@@ -10,7 +10,7 @@ Computes:
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -329,7 +329,7 @@ def save_metrics_to_db(db: Database, metrics: Dict[str, MetricResult]) -> int:
                 result.rolling_sample_3m,
                 result.is_suppressed,
                 result.suppression_reason,
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             )
         )
         saved += 1

@@ -47,3 +47,7 @@ thresholds:
   gap_alert_threshold: 20000
   outlier_low_pct: 50
   outlier_high_pct: 200
+
+# Purchase costs (legal fees, conveyancing, etc.)
+purchase_costs:
+  rate: 0.01  # 1% of purchase price (default)

@@ -39,13 +39,40 @@ logger = logging.getLogger(__name__)
 
 
 def load_config(config_path: str = 'config.yml') -> dict:
-    """Load configuration from YAML file."""
+    """Load configuration from YAML file.
+
+    Financial values can be overridden via environment variables:
+    - SAVINGS_BALANCE: Override savings.current_balance
+    - SAVINGS_MONTHLY: Override savings.monthly_contribution
+    - PPOR_DEBT: Override ppor.debt
+    - IP_DEBT: Override investment_property.debt
+    """
+    import os
+
     path = Path(config_path)
     if not path.exists():
         raise click.ClickException(f"Config file not found: {config_path}")
 
-    with open(path) as f:
-        return yaml.safe_load(f)
+    try:
+        with open(path) as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise click.ClickException(f"Invalid YAML in config file: {e}")
+
+    if config is None:
+        raise click.ClickException("Config file is empty")
+
+    # Override with environment variables (for CI/CD security)
+    if os.environ.get('SAVINGS_BALANCE'):
+        config.setdefault('savings', {})['current_balance'] = int(os.environ['SAVINGS_BALANCE'])
+    if os.environ.get('SAVINGS_MONTHLY'):
+        config.setdefault('savings', {})['monthly_contribution'] = int(os.environ['SAVINGS_MONTHLY'])
+    if os.environ.get('PPOR_DEBT'):
+        config.setdefault('ppor', {})['debt'] = int(os.environ['PPOR_DEBT'])
+    if os.environ.get('IP_DEBT'):
+        config.setdefault('investment_property', {})['debt'] = int(os.environ['IP_DEBT'])
+
+    return config
 
 
 @click.group()
@@ -140,8 +167,8 @@ def ingest(ctx, force):
         try:
             config = TelegramConfig.from_env()
             send_ingest_failure_alert(config, str(e))
-        except Exception:
-            pass  # Don't fail if alert fails
+        except Exception as alert_error:
+            logger.warning(f"Failed to send alert: {alert_error}")
 
         raise click.ClickException(f"Ingest failed: {e}")
 

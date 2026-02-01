@@ -3,7 +3,7 @@
 
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -15,6 +15,15 @@ class Database:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensure connection is closed."""
+        self.close()
+        return False
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -95,6 +104,10 @@ class Database:
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_raw_sales_type_suburb
             ON raw_sales(property_type, suburb, contract_date)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_raw_sales_contract_date
+            ON raw_sales(contract_date)
         """)
 
         # 2. property_meta - Enriched property metadata (bedrooms, etc.)
@@ -261,7 +274,7 @@ class Database:
     def start_run(self, run_type: str, trigger: str) -> str:
         """Start a new run and return the run_id."""
         run_id = str(uuid.uuid4())[:8]
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
 
         self.execute(
             """
@@ -282,7 +295,7 @@ class Database:
         records_updated: int = None,
     ):
         """Complete a run with final status and stats."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         started = self.query(
             "SELECT started_at FROM run_log WHERE run_id = ?", (run_id,)
         )
