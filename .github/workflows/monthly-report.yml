@@ -1,0 +1,180 @@
+name: Monthly PropertyTracker Report
+
+on:
+  # Monthly schedule: 1st of each month at 9 AM AEST (23:00 UTC previous day)
+  # Using 23:00 UTC on last day of month to account for AEST timezone
+  schedule:
+    - cron: '0 23 28-31 * *'  # Run on 28th-31st at 23:00 UTC
+
+  # Manual trigger with options
+  workflow_dispatch:
+    inputs:
+      force_download:
+        description: 'Force re-download of data'
+        required: false
+        default: 'false'
+        type: boolean
+      dry_run:
+        description: 'Dry run (no Telegram message)'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.11'
+  TZ: 'Australia/Sydney'
+
+jobs:
+  run-tracker:
+    runs-on: ubuntu-latest
+
+    # Only run scheduled job on the last day of the month
+    # For manual runs, always run
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' &&
+       (day(github.run_started_at) == 28 ||
+        day(github.run_started_at) == 29 ||
+        day(github.run_started_at) == 30 ||
+        day(github.run_started_at) == 31))
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Create config from secrets
+        run: |
+          cat > config.yml << 'EOF'
+          # PropertyTracker Configuration (from GitHub Secrets)
+          savings:
+            current_balance: ${{ secrets.SAVINGS_BALANCE }}
+            monthly_contribution: ${{ secrets.SAVINGS_MONTHLY }}
+
+          ppor:
+            debt: ${{ secrets.PPOR_DEBT }}
+            selling_cost_rate: 0.02
+
+          investment_property:
+            address: "11 Alliance Ave, Revesby NSW 2212"
+            debt: ${{ secrets.IP_DEBT }}
+            refinance_lvr_cap: 0.80
+            valuation_haircut:
+              bear: 0.90
+              base: 0.95
+              bull: 1.00
+
+          targets:
+            primary: lane_cove_houses
+            secondary: chatswood_houses
+
+          data:
+            source: nswpropertysalesdata
+            districts:
+              - 108  # Canterbury-Bankstown (Revesby)
+              - 118  # North Sydney (Wollstonecraft)
+              - 87   # Lane Cove
+              - 145  # Willoughby (Chatswood)
+
+          telegram:
+            enabled: true
+
+          thresholds:
+            min_sample_monthly: 3
+            min_sample_quarterly: 5
+            min_sample_6month: 8
+            gap_alert_threshold: 20000
+          EOF
+
+      - name: Create data directories
+        run: |
+          mkdir -p data/raw logs outputs
+
+      - name: Download cached database
+        uses: actions/cache@v4
+        with:
+          path: data/tracker.db
+          key: tracker-db-${{ github.run_number }}
+          restore-keys: |
+            tracker-db-
+
+      - name: Run PropertyTracker
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          FORCE_FLAG=""
+          DRY_RUN_FLAG=""
+
+          if [ "${{ github.event.inputs.force_download }}" == "true" ]; then
+            FORCE_FLAG="--force"
+          fi
+
+          if [ "${{ github.event.inputs.dry_run }}" == "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+
+          python -m tracker run $FORCE_FLAG $DRY_RUN_FLAG
+
+      - name: Save database to cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: data/tracker.db
+          key: tracker-db-${{ github.run_number }}
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: outputs-${{ github.run_number }}
+          path: outputs/
+          retention-days: 30
+
+  # Test job - runs on PRs and pushes
+  test:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=tracker --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
