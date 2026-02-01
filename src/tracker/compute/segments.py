@@ -23,6 +23,9 @@ class Segment:
     area_min: Optional[int] = None      # Min land area filter (sqm)
     area_max: Optional[int] = None      # Max land area filter (sqm)
     streets: Optional[FrozenSet[str]] = None  # Street name filter (lowercase)
+    price_min: Optional[int] = None     # Min price filter ($)
+    price_max: Optional[int] = None     # Max price filter ($)
+    require_manual_review: bool = False # Require manual review for comparability
 
     @property
     def is_proxy(self) -> bool:
@@ -36,8 +39,14 @@ class Segment:
 
     @property
     def has_filters(self) -> bool:
-        """Does this segment have area or street filters?"""
-        return self.area_min is not None or self.area_max is not None or self.streets is not None
+        """Does this segment have area, street, or price filters?"""
+        return (
+            self.area_min is not None
+            or self.area_max is not None
+            or self.streets is not None
+            or self.price_min is not None
+            or self.price_max is not None
+        )
 
     def get_filter_description(self) -> Optional[str]:
         """Get human-readable filter description for reports."""
@@ -49,6 +58,13 @@ class Segment:
                 parts.append(f"≥{self.area_min}sqm land")
             elif self.area_max:
                 parts.append(f"≤{self.area_max}sqm land")
+        if self.price_min is not None or self.price_max is not None:
+            if self.price_min and self.price_max:
+                parts.append(f"${self.price_min/1e6:.1f}M-${self.price_max/1e6:.1f}M")
+            elif self.price_min:
+                parts.append(f"≥${self.price_min/1e6:.1f}M")
+            elif self.price_max:
+                parts.append(f"≤${self.price_max/1e6:.1f}M")
         if self.streets:
             street_list = '/'.join(sorted(s.title() for s in self.streets))
             parts.append(f"{street_list} streets")
@@ -81,6 +97,8 @@ def load_segments_from_config(config: dict) -> Dict[str, Segment]:
         area_max = filters.get('area_max')
         streets_list = filters.get('streets', [])
         streets = frozenset(s.lower().strip() for s in streets_list) if streets_list else None
+        price_min = filters.get('price_min')
+        price_max = filters.get('price_max')
 
         segment = Segment(
             code=code,
@@ -92,6 +110,9 @@ def load_segments_from_config(config: dict) -> Dict[str, Segment]:
             area_min=area_min,
             area_max=area_max,
             streets=streets,
+            price_min=price_min,
+            price_max=price_max,
+            require_manual_review=seg_config.get('require_manual_review', False),
         )
         segments[code] = segment
 

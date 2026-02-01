@@ -92,7 +92,10 @@ jobs:
               role: proxy
               filters:
                 streets: [lamont st, milner cres, shirley rd]
-              description: "Units near Lamont St, comparable to your PPOR"
+                price_min: 1000000
+                price_max: 1500000
+              description: "2-bed units near Lamont St, $1.0M-$1.5M range, comparable to your PPOR"
+              require_manual_review: true
 
             lane_cove_houses:
               display_name: "Lane Cove Houses"

@@ -125,6 +125,14 @@ def get_verified_sales_count(db: Database, segment_code: str) -> int:
         query += " AND r.area_sqm <= ?"
         params.append(segment.area_max)
 
+    # Add price filter if specified
+    if segment.price_min is not None:
+        query += " AND r.purchase_price >= ?"
+        params.append(segment.price_min)
+    if segment.price_max is not None:
+        query += " AND r.purchase_price <= ?"
+        params.append(segment.price_max)
+
     rows = db.query(query, tuple(params))
     return rows[0]['count'] if rows else 0
 
@@ -211,6 +219,20 @@ def get_period_sales(
             query += f" AND LOWER(street_name) IN ({street_placeholders})"
         params.extend(street_list)
 
+    # Add price filter if specified
+    if segment.price_min is not None:
+        if use_verified_only:
+            query += " AND r.purchase_price >= ?"
+        else:
+            query += " AND purchase_price >= ?"
+        params.append(segment.price_min)
+    if segment.price_max is not None:
+        if use_verified_only:
+            query += " AND r.purchase_price <= ?"
+        else:
+            query += " AND purchase_price <= ?"
+        params.append(segment.price_max)
+
     rows = db.query(query, tuple(params))
 
     return [row['purchase_price'] for row in rows]
@@ -260,6 +282,14 @@ def get_period_sales_with_details(
         street_placeholders = ','.join(['?' for _ in street_list])
         base_where += f" AND LOWER(street_name) IN ({street_placeholders})"
         params.extend(street_list)
+
+    # Add price filter if specified
+    if segment.price_min is not None:
+        base_where += " AND purchase_price >= ?"
+        params.append(segment.price_min)
+    if segment.price_max is not None:
+        base_where += " AND purchase_price <= ?"
+        params.append(segment.price_max)
 
     # Get all prices
     query = f"SELECT purchase_price FROM raw_sales WHERE {base_where}"
@@ -347,6 +377,14 @@ def get_verified_sales_with_dates(
     if segment.area_max is not None:
         query += " AND r.area_sqm <= ?"
         params.append(segment.area_max)
+
+    # Add price filter if specified
+    if segment.price_min is not None:
+        query += " AND r.purchase_price >= ?"
+        params.append(segment.price_min)
+    if segment.price_max is not None:
+        query += " AND r.purchase_price <= ?"
+        params.append(segment.price_max)
 
     query += " ORDER BY r.contract_date DESC"
 
