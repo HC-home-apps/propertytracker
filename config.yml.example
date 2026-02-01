@@ -45,6 +45,12 @@ segments:
       area_min: 500  # sqm - matches your IP land size
       area_max: 600
     description: "500-600sqm land, comparable to your IP"
+    # Comparables review settings
+    require_manual_review: true
+    auto_exclude:
+      non_r2_zoning: true
+      year_built_after: 2010
+      keywords: [duplex, dual occ, torrens, brand new, just completed]
 
   wollstonecraft_units:
     display_name: "Wollstonecraft Units (PPOR)"
@@ -141,6 +147,13 @@ thresholds:
 # Legal fees, conveyancing, inspections, etc.
 purchase_costs:
   rate: 0.01  # 1% of purchase price (default)
+
+# ===================
+# ENRICHMENT
+# ===================
+# Auto-enrichment settings for comparable review workflow
+enrichment:
+  domain_api_key: ${DOMAIN_API_KEY}  # Optional: Domain API key for year built lookup
 
 # ===================
 # SCHEDULE
