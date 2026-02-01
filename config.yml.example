@@ -1,0 +1,49 @@
+# PropertyTracker Configuration
+# Copy to config.yml and fill in your values
+
+# Personal financial inputs
+savings:
+  current_balance: 150000
+  monthly_contribution: 5000
+
+# PPOR (Wollstonecraft unit to sell)
+ppor:
+  debt: 400000
+  selling_cost_rate: 0.02
+
+# Investment Property (Revesby)
+investment_property:
+  address: "11 Alliance Ave, Revesby NSW 2212"
+  debt: 600000
+  refinance_lvr_cap: 0.80
+  valuation_haircut:
+    bear: 0.90
+    base: 0.95
+    bull: 1.00
+
+# Target markets
+targets:
+  primary: "lane_cove_houses"
+  secondary: "chatswood_houses"
+
+# Data source
+data:
+  source: "nswpropertysalesdata"
+  districts:
+    - 108  # Canterbury-Bankstown (Revesby)
+    - 118  # North Sydney (Wollstonecraft)
+    - 87   # Lane Cove
+    - 145  # Willoughby (Chatswood)
+
+# Alerting
+telegram:
+  enabled: true
+
+# Thresholds
+thresholds:
+  min_sample_monthly: 3
+  min_sample_quarterly: 5
+  min_sample_6month: 8
+  gap_alert_threshold: 20000
+  outlier_low_pct: 50
+  outlier_high_pct: 200
