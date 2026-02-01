@@ -78,11 +78,53 @@ def compute_yoy_change(current: Optional[int], prior: Optional[int]) -> Optional
     return round(((current - prior) / prior) * 100, 1)
 
 
+def get_verified_sales_count(db: Database, segment_code: str) -> int:
+    """
+    Get count of verified comparable sales for a segment.
+
+    Args:
+        db: Database connection
+        segment_code: Segment to count
+
+    Returns:
+        Number of sales with use_in_median=True
+    """
+    segment = get_segment(segment_code)
+    if not segment:
+        return 0
+
+    suburbs = list(segment.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    query = f"""
+        SELECT COUNT(*) as count
+        FROM raw_sales r
+        JOIN sale_classifications sc ON r.dealing_number = sc.sale_id
+        WHERE LOWER(r.suburb) IN ({placeholders})
+          AND r.property_type = ?
+          AND sc.use_in_median = 1
+    """
+
+    params: List = list(suburbs) + [segment.property_type]
+
+    # Add area filter if specified
+    if segment.area_min is not None:
+        query += " AND r.area_sqm >= ?"
+        params.append(segment.area_min)
+    if segment.area_max is not None:
+        query += " AND r.area_sqm <= ?"
+        params.append(segment.area_max)
+
+    rows = db.query(query, tuple(params))
+    return rows[0]['count'] if rows else 0
+
+
 def get_period_sales(
     db: Database,
     segment_code: str,
     start_date: date,
     end_date: date,
+    use_verified_only: bool = False,
 ) -> List[int]:
     """
     Get sale prices for a segment within a date range.
@@ -98,6 +140,7 @@ def get_period_sales(
         segment_code: Segment to query
         start_date: Period start (inclusive)
         end_date: Period end (inclusive)
+        use_verified_only: If True, only include sales with use_in_median=True
 
     Returns:
         List of sale prices
@@ -110,30 +153,52 @@ def get_period_sales(
     suburbs = list(segment.suburbs)
     placeholders = ','.join(['?' for _ in suburbs])
 
-    query = f"""
-        SELECT purchase_price
-        FROM raw_sales
-        WHERE LOWER(suburb) IN ({placeholders})
-          AND property_type = ?
-          AND contract_date BETWEEN ? AND ?
-          AND purchase_price > 0
-    """
+    # Build query with optional verified-only filter
+    if use_verified_only:
+        query = f"""
+            SELECT r.purchase_price
+            FROM raw_sales r
+            JOIN sale_classifications sc ON r.dealing_number = sc.sale_id
+            WHERE LOWER(r.suburb) IN ({placeholders})
+              AND r.property_type = ?
+              AND r.contract_date BETWEEN ? AND ?
+              AND r.purchase_price > 0
+              AND sc.use_in_median = 1
+        """
+    else:
+        query = f"""
+            SELECT purchase_price
+            FROM raw_sales
+            WHERE LOWER(suburb) IN ({placeholders})
+              AND property_type = ?
+              AND contract_date BETWEEN ? AND ?
+              AND purchase_price > 0
+        """
 
     params: List = list(suburbs) + [segment.property_type, start_date.isoformat(), end_date.isoformat()]
 
     # Add area filter if specified
     if segment.area_min is not None:
-        query += " AND area_sqm >= ?"
+        if use_verified_only:
+            query += " AND r.area_sqm >= ?"
+        else:
+            query += " AND area_sqm >= ?"
         params.append(segment.area_min)
     if segment.area_max is not None:
-        query += " AND area_sqm <= ?"
+        if use_verified_only:
+            query += " AND r.area_sqm <= ?"
+        else:
+            query += " AND area_sqm <= ?"
         params.append(segment.area_max)
 
     # Add street filter if specified
     if segment.streets:
         street_list = list(segment.streets)
         street_placeholders = ','.join(['?' for _ in street_list])
-        query += f" AND LOWER(street_name) IN ({street_placeholders})"
+        if use_verified_only:
+            query += f" AND LOWER(r.street_name) IN ({street_placeholders})"
+        else:
+            query += f" AND LOWER(street_name) IN ({street_placeholders})"
         params.extend(street_list)
 
     rows = db.query(query, tuple(params))
