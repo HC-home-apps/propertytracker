@@ -157,7 +157,10 @@ def init_segments(config: dict) -> Dict[str, Segment]:
         Dict of loaded segments
     """
     global SEGMENTS
-    SEGMENTS = load_segments_from_config(config)
+    loaded = load_segments_from_config(config)
+    # Update in-place to preserve import bindings
+    SEGMENTS.clear()
+    SEGMENTS.update(loaded)
     return SEGMENTS
 
 

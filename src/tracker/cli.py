@@ -448,7 +448,7 @@ def enrich(ctx, segment, limit, api_key):
     from tracker.enrich.pipeline import process_pending_sales
 
     config = load_config(ctx.obj['config_path'])
-    init_segments(config.get('segments', {}))
+    init_segments(config)
 
     db = Database(db_path=ctx.obj['db_path'])
     db.init_schema()
@@ -465,7 +465,7 @@ def enrich(ctx, segment, limit, api_key):
 def pending(ctx, segment):
     """Show sales pending review."""
     config = load_config(ctx.obj['config_path'])
-    init_segments(config.get('segments', {}))
+    init_segments(config)
 
     db = Database(db_path=ctx.obj['db_path'])
 
@@ -504,7 +504,7 @@ def review_send(ctx, segment, limit, dry_run):
     from tracker.notify.telegram import TelegramConfig, send_message
 
     config = load_config(ctx.obj['config_path'])
-    init_segments(config.get('segments', {}))
+    init_segments(config)
 
     db = Database(db_path=ctx.obj['db_path'])
 
@@ -591,7 +591,7 @@ def review_apply(ctx, segment, response):
     Example: --response 'ynyynyyy'
     """
     config = load_config(ctx.obj['config_path'])
-    init_segments(config.get('segments', {}))
+    init_segments(config)
 
     db = Database(db_path=ctx.obj['db_path'])
 
