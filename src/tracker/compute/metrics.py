@@ -28,6 +28,15 @@ MIN_SAMPLE_6MONTH = 8
 
 
 @dataclass
+class SaleRecord:
+    """A single sale record for transparency."""
+    contract_date: str
+    address: str
+    price: int
+    area_sqm: Optional[float] = None
+
+
+@dataclass
 class MetricResult:
     """Result of metric computation for a segment/period."""
 
@@ -44,6 +53,10 @@ class MetricResult:
     suppression_reason: Optional[str] = None
     display_name: Optional[str] = None  # For reports
     filter_description: Optional[str] = None  # Description of applied filters
+    # Transparency fields
+    oldest_sale_date: Optional[str] = None  # Oldest sale in sample
+    newest_sale_date: Optional[str] = None  # Newest sale in sample
+    recent_sales: Optional[List[SaleRecord]] = None  # Last N sales for transparency
 
 
 def compute_median(prices: List[int]) -> Optional[int]:
@@ -126,6 +139,92 @@ def get_period_sales(
     rows = db.query(query, tuple(params))
 
     return [row['purchase_price'] for row in rows]
+
+
+def get_period_sales_with_details(
+    db: Database,
+    segment_code: str,
+    start_date: date,
+    end_date: date,
+    limit_recent: int = 5,
+) -> tuple:
+    """
+    Get sale prices with date range and recent sales for transparency.
+
+    Returns:
+        Tuple of (prices, oldest_date, newest_date, recent_sales)
+    """
+    segment = get_segment(segment_code)
+    if not segment:
+        return [], None, None, []
+
+    # Build suburb list for SQL
+    suburbs = list(segment.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    base_where = f"""
+        LOWER(suburb) IN ({placeholders})
+        AND property_type = ?
+        AND contract_date BETWEEN ? AND ?
+        AND purchase_price > 0
+    """
+
+    params: List = list(suburbs) + [segment.property_type, start_date.isoformat(), end_date.isoformat()]
+
+    # Add area filter if specified
+    if segment.area_min is not None:
+        base_where += " AND area_sqm >= ?"
+        params.append(segment.area_min)
+    if segment.area_max is not None:
+        base_where += " AND area_sqm <= ?"
+        params.append(segment.area_max)
+
+    # Add street filter if specified
+    if segment.streets:
+        street_list = list(segment.streets)
+        street_placeholders = ','.join(['?' for _ in street_list])
+        base_where += f" AND LOWER(street_name) IN ({street_placeholders})"
+        params.extend(street_list)
+
+    # Get all prices
+    query = f"SELECT purchase_price FROM raw_sales WHERE {base_where}"
+    rows = db.query(query, tuple(params))
+    prices = [row['purchase_price'] for row in rows]
+
+    # Get date range
+    date_query = f"""
+        SELECT MIN(contract_date) as oldest, MAX(contract_date) as newest
+        FROM raw_sales WHERE {base_where}
+    """
+    date_result = db.query(date_query, tuple(params))
+    oldest_date = date_result[0]['oldest'] if date_result else None
+    newest_date = date_result[0]['newest'] if date_result else None
+
+    # Get recent sales for transparency
+    recent_query = f"""
+        SELECT contract_date, house_number, unit_number, street_name, purchase_price, area_sqm
+        FROM raw_sales WHERE {base_where}
+        ORDER BY contract_date DESC
+        LIMIT ?
+    """
+    recent_params = tuple(params) + (limit_recent,)
+    recent_rows = db.query(recent_query, recent_params)
+
+    recent_sales = []
+    for row in recent_rows:
+        # Format address
+        unit = f"Unit {row['unit_number']} " if row['unit_number'] else ""
+        house = row['house_number'] or ""
+        address = f"{unit}{house} {row['street_name']}".strip()
+
+        recent_sales.append(SaleRecord(
+            contract_date=row['contract_date'],
+            address=address,
+            price=row['purchase_price'],
+            area_sqm=row['area_sqm'],
+        ))
+
+    return prices, oldest_date, newest_date, recent_sales
 
 
 def compute_segment_metrics(
@@ -229,6 +328,11 @@ def _compute_with_period(
     rolling_prices = get_period_sales(db, segment_code, rolling_start, reference_date)
     rolling_median = compute_median(rolling_prices)
 
+    # Get transparency data (date range and recent sales)
+    _, oldest_date, newest_date, recent_sales = get_period_sales_with_details(
+        db, segment_code, period_start, period_end, limit_recent=5
+    )
+
     return MetricResult(
         segment=segment_code,
         period_start=period_start,
@@ -243,6 +347,9 @@ def _compute_with_period(
         suppression_reason=None,
         display_name=segment.display_name if segment else segment_code,
         filter_description=segment.get_filter_description() if segment else None,
+        oldest_sale_date=oldest_date,
+        newest_sale_date=newest_date,
+        recent_sales=recent_sales,
     )
 
 

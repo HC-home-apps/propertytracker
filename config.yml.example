@@ -10,18 +10,18 @@ savings:
 
 # PPOR (Wollstonecraft unit to sell)
 ppor:
-  debt: 400000
-  selling_cost_rate: 0.02
+  debt: 925660  # Current loan balance
+  selling_cost_rate: 0.02  # Agent fees, legals, etc.
 
 # Investment Property (Revesby)
 investment_property:
   address: "11 Alliance Ave, Revesby NSW 2212"
-  debt: 600000
-  refinance_lvr_cap: 0.80
+  debt: 1476000  # Current loan balance (interest-only)
+  refinance_lvr_cap: 0.80  # Can only extract equity up to 80% LVR
   valuation_haircut:
-    bear: 0.90
-    base: 0.95
-    bull: 1.00
+    bear: 0.90  # Conservative valuation
+    base: 0.95  # Expected valuation
+    bull: 1.00  # Optimistic valuation
 
 # ===================
 # SEGMENT DEFINITIONS
@@ -100,6 +100,9 @@ report:
 
   # Add inline explanations of what each segment means?
   include_explanations: true
+
+  # Show recent sales in report for transparency?
+  show_recent_sales: true
 
   # Report title
   title: "PropertyTracker Report"

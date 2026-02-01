@@ -88,6 +88,7 @@ def send_message(
 def format_metric_line(
     metric: MetricResult,
     include_filter: bool = True,
+    include_dates: bool = True,
 ) -> str:
     """
     Format a single metric line for Telegram.
@@ -95,6 +96,7 @@ def format_metric_line(
     Args:
         metric: MetricResult to format
         include_filter: Whether to include filter description
+        include_dates: Whether to include date range
 
     Returns:
         Formatted metric line
@@ -118,7 +120,25 @@ def format_metric_line(
     if include_filter and metric.filter_description:
         line += f"\n  Filtered: {metric.filter_description}"
 
+    # Add date range for transparency
+    if include_dates and metric.oldest_sale_date and metric.newest_sale_date:
+        line += f"\n  Sales from: {metric.oldest_sale_date} to {metric.newest_sale_date}"
+
     return line
+
+
+def format_recent_sales(metric: MetricResult, max_sales: int = 5) -> List[str]:
+    """Format recent sales for transparency."""
+    lines = []
+    if not metric.recent_sales:
+        return lines
+
+    lines.append(f"<u>Last {len(metric.recent_sales)} sales ({metric.display_name or metric.segment}):</u>")
+    for sale in metric.recent_sales[:max_sales]:
+        area_str = f" ({sale.area_sqm:.0f}sqm)" if sale.area_sqm else ""
+        lines.append(f"  {sale.contract_date}: {sale.address} - {format_currency(sale.price)}{area_str}")
+
+    return lines
 
 
 def format_gap_tracker_section(gap_tracker: GapTrackerResult) -> List[str]:
@@ -274,6 +294,58 @@ def format_monthly_report(
     # Verdict
     verdict = _compute_verdict(gap_tracker, affordability)
     lines.append(f"<b>Verdict:</b> {verdict}")
+
+    # Add transparency section with recent sales (optional, controlled by config)
+    show_recent_sales = report_config.get('show_recent_sales', False)
+    if show_recent_sales:
+        lines.append("")
+        lines.append("<b>Recent Sales (for transparency)</b>")
+        for code in show_proxies:
+            if code in metrics and metrics[code].recent_sales:
+                lines.extend(format_recent_sales(metrics[code], max_sales=3))
+
+    return "\n".join(lines)
+
+
+def format_detailed_report(
+    metrics: Dict[str, MetricResult],
+    gap_tracker: GapTrackerResult,
+    affordability: AffordabilityResult,
+    period: str,
+    config: Optional[dict] = None,
+) -> str:
+    """
+    Format a detailed report with all transparency information.
+
+    This is a longer format that includes:
+    - All sections from the standard report
+    - Recent sales for each segment
+    - Calculation rules explanation
+    """
+    # Start with standard report
+    report = format_monthly_report(metrics, gap_tracker, affordability, period, config)
+
+    lines = [report, "", "<b>Sample Details</b>"]
+
+    # Show recent sales for all segments
+    report_config = config.get('report', {}) if config else {}
+    show_proxies = report_config.get('show_proxies', ['revesby_houses', 'wollstonecraft_units'])
+
+    for code in show_proxies:
+        if code in metrics:
+            metric = metrics[code]
+            if metric.recent_sales:
+                lines.append("")
+                lines.extend(format_recent_sales(metric, max_sales=5))
+
+    # Add calculation rules
+    lines.append("")
+    lines.append("<b>Calculation Rules</b>")
+    lines.append("• Medians use sales from last 6 months (or fallback periods)")
+    lines.append("• YoY compares same period vs prior year")
+    lines.append("• Filters: area (sqm) and/or streets as configured")
+    lines.append("• Equity: (Value × 0.95 haircut × 0.80 LVR) - Debt")
+    lines.append("• PPOR net: (Value × 0.95 - 2% costs) - Debt")
 
     return "\n".join(lines)
 
