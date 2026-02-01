@@ -9,6 +9,7 @@ from tracker.review.telegram import (
     format_review_message,
     parse_review_reply,
     format_domain_url,
+    update_review_statuses,
 )
 
 
@@ -120,3 +121,33 @@ class TestParseReviewReply:
 
         result = parse_review_reply("hello", sale_count=3)
         assert result is None
+
+
+class TestUpdateReviewStatuses:
+    """Test updating review statuses in database."""
+
+    def test_updates_statuses(self, temp_db):
+        """Updates review statuses in database."""
+        # Insert test classifications
+        temp_db.execute("""
+            INSERT INTO sale_classifications (sale_id, address, review_status, use_in_median)
+            VALUES ('DN1', '15 Smith St', 'pending', 0),
+                   ('DN2', '20 Jones Ave', 'pending', 0),
+                   ('DN3', '25 Brown Rd', 'pending', 0)
+        """)
+
+        sale_ids = ['DN1', 'DN2', 'DN3']
+        statuses = ['comparable', 'not_comparable', 'comparable']
+
+        updated = update_review_statuses(temp_db, sale_ids, statuses)
+
+        assert updated == 3
+
+        # Check database
+        rows = temp_db.query("SELECT * FROM sale_classifications ORDER BY sale_id")
+        assert rows[0]['review_status'] == 'comparable'
+        assert rows[0]['use_in_median'] == 1
+        assert rows[1]['review_status'] == 'not_comparable'
+        assert rows[1]['use_in_median'] == 0
+        assert rows[2]['review_status'] == 'comparable'
+        assert rows[2]['use_in_median'] == 1
