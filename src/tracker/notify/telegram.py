@@ -587,7 +587,7 @@ def format_simple_report(
         median_str = format_currency(pos.median_price)
         if pos.equity_or_net is not None:
             equity_str = format_currency(pos.equity_or_net)
-            label = "net" if pos.is_ppor else "equity"
+            label = "net" if pos.is_ppor else "usable equity"
             # Shorten display name for position line
             short_name = pos.display_name.split(' (')[0]
             lines.append(f"{short_name}: {median_str} median -> ~{equity_str} {label}")
