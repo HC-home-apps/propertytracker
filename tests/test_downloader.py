@@ -48,22 +48,24 @@ class TestIsArchiveStale:
 class TestDownloadPsiArchive:
     """Test PSI archive download."""
 
-    @patch('tracker.ingest.downloader.requests.get')
-    def test_downloads_to_correct_path(self, mock_get, tmp_path):
+    @patch('tracker.ingest.downloader.requests.Session')
+    def test_downloads_to_correct_path(self, mock_session_cls, tmp_path):
         """Verify download saves to expected location."""
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.iter_content = lambda chunk_size: [b'PK\x03\x04test']
-        mock_get.return_value = mock_response
+        mock_session.get.return_value = mock_response
 
         result = download_psi_archive(tmp_path)
 
         assert result.exists()
         assert result.name == 'archive.zip'
-        mock_get.assert_called_once()
+        mock_session.get.assert_called_once()
 
-    @patch('tracker.ingest.downloader.requests.get')
-    def test_skips_download_if_fresh(self, mock_get, tmp_path):
+    @patch('tracker.ingest.downloader.requests.Session')
+    def test_skips_download_if_fresh(self, mock_session_cls, tmp_path):
         """Should not download if file exists and is fresh."""
         archive = tmp_path / 'archive.zip'
         archive.write_bytes(b'existing')
@@ -71,31 +73,35 @@ class TestDownloadPsiArchive:
         result = download_psi_archive(tmp_path, force=False)
 
         assert result == archive
-        mock_get.assert_not_called()
+        mock_session_cls.return_value.get.assert_not_called()
 
-    @patch('tracker.ingest.downloader.requests.get')
-    def test_force_redownload(self, mock_get, tmp_path):
+    @patch('tracker.ingest.downloader.requests.Session')
+    def test_force_redownload(self, mock_session_cls, tmp_path):
         """Force flag should download even if file exists."""
         archive = tmp_path / 'archive.zip'
         archive.write_bytes(b'old')
 
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.iter_content = lambda chunk_size: [b'new']
-        mock_get.return_value = mock_response
+        mock_session.get.return_value = mock_response
 
         result = download_psi_archive(tmp_path, force=True)
 
         assert result.exists()
-        mock_get.assert_called_once()
+        mock_session.get.assert_called_once()
 
-    @patch('tracker.ingest.downloader.requests.get')
-    def test_handles_download_error(self, mock_get, tmp_path):
+    @patch('tracker.ingest.downloader.requests.Session')
+    def test_handles_download_error(self, mock_session_cls, tmp_path):
         """Should raise on HTTP error."""
+        mock_session = MagicMock()
+        mock_session_cls.return_value = mock_session
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.raise_for_status.side_effect = Exception("Server error")
-        mock_get.return_value = mock_response
+        mock_session.get.return_value = mock_response
 
         with pytest.raises(Exception, match="Server error"):
             download_psi_archive(tmp_path, force=True)

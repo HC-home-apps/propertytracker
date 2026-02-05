@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional, List
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +96,17 @@ def download_psi_archive(
 
     logger.info(f"Downloading PSI archive from {PSI_ARCHIVE_URL}")
 
-    response = requests.get(
+    # Retry with exponential backoff for transient network errors
+    # (GitHub Actions runners can have intermittent connectivity to AU hosts)
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=10,  # waits 0s, 10s, 20s between retries
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retry_strategy))
+
+    response = session.get(
         PSI_ARCHIVE_URL,
         stream=True,
         timeout=timeout,
