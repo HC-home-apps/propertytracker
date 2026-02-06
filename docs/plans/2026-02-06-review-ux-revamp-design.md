@@ -8,7 +8,7 @@
 The current Telegram review experience has three issues:
 
 1. **UI/UX** — Individual messages per sale are cramped and spammy on mobile. No links to verify properties. Hard to scan.
-2. **Reliability** — Domain API misses sales. Enrichment data (zoning, year_built) can be wrong or missing with no indication. Button callbacks expire after 24h.
+2. **Reliability** — Domain API is paid and may not be available. Sales are being missed. Enrichment data (zoning, year_built) can be wrong or missing with no indication. Button callbacks expire after 24h.
 3. **Accuracy** — Irrelevant properties slip through (knockdown-rebuilds in Revesby, wrong building type/noisy location in Wollstonecraft), but filters stay as-is — manual review handles this.
 
 ## Design
@@ -22,24 +22,28 @@ Replace individual review messages with one digest per segment. All pending sale
 ```html
 📋 <b>Revesby Houses</b> — 3 to review
 
-1. <a href="https://domain.com.au/...">15 Alliance Ave</a> (556sqm)
+1. <a href="https://www.domain.com.au/...">15 Alliance Ave</a> (556sqm)
    $1,420,000 · R2 · Built 1965
 
-2. <a href="https://domain.com.au/...">20 Smith St</a> (580sqm)
+2. <a href="https://www.domain.com.au/...">20 Smith St</a> (580sqm)
    $1,380,000 · R2 · Built 1972
 
-3. <a href="https://domain.com.au/...">8 Jones Ave</a> (520sqm)
+3. <a href="https://www.domain.com.au/...">8 Jones Ave</a> (520sqm)
    $1,350,000 · R3 · Year unknown
 ```
+
+Each address is a clickable hyperlink to the Domain listing page (or Google search fallback).
 
 **Inline keyboard layout:**
 
 ```
-Row 1: [1 ✅] [1 ❌]    [2 ✅] [2 ❌]
-Row 2: [3 ✅] [3 ❌]
-Row 3: [All ✅]  [All ❌]
+Row 1: [1 ✅] [1 ❌]
+Row 2: [2 ✅] [2 ❌]
+Row 3: [3 ✅] [3 ❌]
+Row 4: [All ✅]  [All ❌]
 ```
 
+- One row of buttons per sale, plus a bulk row at the bottom.
 - Max 5 sales per message (Telegram keyboard limits). Overflow goes into a second message.
 - Each button callback: `review:{segment}:{sale_id}:{yes|no}`
 - Bulk buttons: `review:{segment}:all:{yes|no}`
@@ -51,31 +55,83 @@ The message edits itself:
 - That sale's button row is removed
 - Once all sales are decided, all buttons are removed
 
-### 2. Domain Listing Links
+### 2. Property Listing Links (No Domain API Required)
 
-**Source:** Domain suggest API (`/v1/properties/_suggest`) already called during enrichment for `year_built`. Also returns `relativeUrl`.
+Domain API is paid — we do NOT depend on it. Instead, property URLs come from the Google search ingest (see section 3).
 
-**Storage:** New column `domain_url TEXT` in `sale_classifications` table.
+**Link sources (in priority order):**
 
-**URL construction:** `https://www.domain.com.au{relativeUrl}`
+1. **Domain listing URL** — extracted from Google search results during ingest (the search returns `domain.com.au/...` URLs directly)
+2. **Google search fallback** — if no Domain URL was captured: `https://www.google.com/search?q={address}+{suburb}+sold`
 
-**Fallback:** If suggest API returns no result, construct a Google search link: `https://www.google.com/search?q={address}+{suburb}+sold`
+**Storage:** New column `listing_url TEXT` in `sale_classifications` table.
 
-### 3. Improved Domain Ingest
+### 3. Google Search Ingest (Replaces Domain API)
 
-**Current:** Only uses `/v1/salesResults/{suburb}` — misses some sales.
+The Domain API (`/v1/salesResults` and `/v1/properties/_suggest`) is paid. We replace it with a two-tier approach:
 
-**Add:** Also query `/v1/listings/residential/_search` with `listingType=Sold` for each segment's suburb/property type. Deduplicate against existing provisional sales by normalised address.
+#### Tier 1: Google Search Scrape (Primary)
 
-**Frequency:** Consider running Domain ingest daily (lightweight API calls) while keeping VG ingest weekly.
+A Python module that searches Google for recent sold listings per segment.
 
-### 4. Enrichment Error Visibility
+**Search queries per segment:**
+- Revesby: `site:domain.com.au sold Revesby house 500sqm OR 550sqm OR 600sqm`
+- Wollstonecraft: `site:domain.com.au sold Wollstonecraft 2 bed 1 bath apartment`
 
-- When `year_built` lookup fails: display "Year unknown" in digest instead of omitting
-- When zoning API returns multiple/ambiguous results: display "Zoning unverified" instead of picking first result
-- These labels are visible in the review message so the user knows data quality
+**What we extract from Google search results:**
+- Domain listing URL (from the result link)
+- Address (from the result title/snippet)
+- Price (from the snippet, if shown — e.g. "Sold for $1,420,000")
+- Beds/baths/car (from the snippet)
 
-### 5. Callback Handling
+**Anti-blocking measures:**
+- Random delays between requests (2-5 seconds)
+- Rotating user agent strings
+- Max 4-6 queries per weekly run (2 segments × 2-3 queries each)
+- Run only during weekly CI, not frequently
+
+**If Google blocks the request:** Fail gracefully, log warning, continue with VG data only.
+
+#### Tier 2: LLM Agent Fallback (When Snippets Lack Detail)
+
+When Google search snippets don't contain enough data (e.g. price missing, beds/baths unclear), use an LLM agent to:
+
+1. Visit the Domain listing URL extracted from Google
+2. Extract structured data: price, beds, baths, car spaces, land size, year built, property description
+3. Return as structured JSON for storage
+
+**Implementation:** A simple function that calls an LLM (Claude API) with the listing page content and a prompt to extract property details.
+
+**When to trigger:**
+- After Google search ingest, for any sale with missing price or missing beds/baths
+- Rate limited: max 10 agent calls per weekly run
+
+### 4. Price Withheld Tracking
+
+Sales with "price withheld" (common in AU real estate) are handled specially:
+
+- Ingest the sale as a provisional sale with `price = NULL` and `status = 'price_withheld'`
+- Do NOT send for review (can't judge comparability without price)
+- Show in weekly report as: `"5/10 Shirley Rd — Price withheld (awaiting VG)"`
+- When VG data arrives (~2 months later), the matcher links them, fills in the price
+- The sale then enters the normal review queue with price
+
+### 5. Enrichment Without Domain API
+
+**Year built:**
+- Primary: extracted by LLM agent from Domain listing page (when agent fallback is triggered)
+- Secondary: NSW Planning Portal may include build year in some council data
+- Fallback: show "Year unknown" in review digest
+
+**Zoning:**
+- NSW Planning Portal API (free, unchanged)
+- When API returns multiple/ambiguous results: display "Zoning unverified"
+
+**Domain listing URL:**
+- Captured during Google search ingest (the search result IS a domain.com.au URL)
+- No separate API call needed
+
+### 6. Callback Handling
 
 **Cloudflare Worker (`webhook/worker.js`):**
 
@@ -89,7 +145,7 @@ Updated to handle batched message callbacks:
 - 6h poll workflow (`review-poll.yml`) — Worker handles callbacks immediately
 - Individual review message sending (`send_review_with_buttons` for single sales)
 
-### 6. What Doesn't Change
+### 7. What Doesn't Change
 
 - Segment filters (area, zoning, year_built thresholds, duplex keywords) — stay as-is
 - No rejection reason codes — keep review as simple Yes/No
@@ -103,22 +159,25 @@ Updated to handle batched message callbacks:
 | File | Change |
 |------|--------|
 | `src/tracker/notify/telegram.py` | New `send_review_digest()` function; remove single-sale review flow |
-| `src/tracker/enrich/pipeline.py` | Store `domain_url` from suggest API |
-| `src/tracker/enrich/domain.py` | Return `relativeUrl` alongside `year_built` |
-| `src/tracker/db.py` | Add `domain_url` column to `sale_classifications` |
+| `src/tracker/enrich/pipeline.py` | Store `listing_url`, improve error labelling |
+| `src/tracker/enrich/domain.py` | Replace with LLM agent fallback for detail extraction |
+| `src/tracker/db.py` | Add `listing_url` column to `sale_classifications`; add `price_withheld` status to `provisional_sales` |
 | `src/tracker/cli.py` | Update `review-buttons` command to send digests |
-| `src/tracker/ingest/domain_sold.py` | Add `/v1/listings/residential/_search` data source |
+| `src/tracker/ingest/domain_sold.py` | Replace Domain API calls with Google search scrape |
+| `src/tracker/ingest/google_search.py` | **New file:** Google search scraper for sold listings |
+| `src/tracker/ingest/llm_agent.py` | **New file:** LLM agent fallback for extracting listing details |
 | `webhook/worker.js` | Handle batched callbacks, edit message with verdicts |
-| `config.yml` | No changes |
-| `.github/workflows/weekly-report.yml` | Update review step to use digest |
+| `.github/workflows/weekly-report.yml` | Update ingest + review steps |
 | `.github/workflows/review-poll.yml` | Remove (replaced by Worker) |
 
 ## Implementation Order
 
-1. DB schema: add `domain_url` column
-2. Enrichment: capture `domain_url` from suggest API, improve error labelling
-3. Domain ingest: add second API endpoint
-4. Telegram digest: new `send_review_digest()` with batched buttons + links
-5. Cloudflare Worker: handle batched callbacks
-6. CLI: update `review-buttons` to send digests
-7. Cleanup: remove old single-sale review flow, remove poll workflow
+1. Google search ingest: new `google_search.py` module, update `domain_sold.py`
+2. LLM agent fallback: new `llm_agent.py` module
+3. DB schema: add `listing_url` column, `price_withheld` status
+4. Price withheld tracking: ingest + deferred review logic
+5. Enrichment: use LLM agent for year_built, improve error labelling
+6. Telegram digest: new `send_review_digest()` with batched buttons + clickable address links
+7. Cloudflare Worker: handle batched callbacks
+8. CLI: update `review-buttons` to send digests
+9. Cleanup: remove Domain API dependency, remove old single-sale review flow, remove poll workflow
