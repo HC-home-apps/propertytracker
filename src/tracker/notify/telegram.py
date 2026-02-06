@@ -975,7 +975,9 @@ def format_simple_report(
                 price = sale.get('sold_price', 0)
                 sold_date = sale.get('sold_date', '')
                 bed_info = _format_bed_bath_car(sale)
-                line = f"  {sold_date}: {address} - {format_currency(price)}"
+                listing_url = sale.get('listing_url', '')
+                addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
+                line = f"  {sold_date}: {addr_display} - {format_currency(price)}"
                 if bed_info:
                     line += f" ({bed_info})"
                 lines.append(line)
@@ -990,7 +992,9 @@ def format_simple_report(
             address = _format_provisional_address(sale)
             price = sale.get('sold_price', 0)
             sold_date = sale.get('sold_date', '')
-            lines.append(f"  {sold_date}: {address} - {format_currency(price)}")
+            listing_url = sale.get('listing_url', '')
+            addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
+            lines.append(f"  {sold_date}: {addr_display} - {format_currency(price)}")
         lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
 
     return "\n".join(lines)
