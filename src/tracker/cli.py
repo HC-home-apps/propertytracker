@@ -38,6 +38,7 @@ from tracker.notify.telegram import (
     format_monthly_report,
     format_simple_report,
     send_simple_report,
+    send_review_digest,
     compute_segment_position,
 )
 
@@ -990,8 +991,6 @@ def report(ctx, ref_date, detailed):
 @click.pass_context
 def review_buttons(ctx, segment, limit, dry_run):
     """Send pending sales to Telegram with inline Yes/No buttons."""
-    from tracker.notify.telegram import TelegramConfig, send_review_with_buttons
-
     config = load_config(ctx.obj['config_path'])
     init_segments(config)
 
@@ -1013,7 +1012,8 @@ def review_buttons(ctx, segment, limit, dry_run):
             r.purchase_price as price,
             r.area_sqm,
             sc.zoning,
-            sc.year_built
+            sc.year_built,
+            sc.listing_url
         FROM sale_classifications sc
         JOIN raw_sales r ON sc.sale_id = r.dealing_number
         WHERE sc.review_status = 'pending'
@@ -1033,7 +1033,7 @@ def review_buttons(ctx, segment, limit, dry_run):
         db.close()
         return
 
-    click.echo(f"Sending {len(rows)} sales for review with buttons...")
+    click.echo(f"Sending {len(rows)} sales for review in batched digest...")
 
     if dry_run:
         for row in rows:
@@ -1042,30 +1042,44 @@ def review_buttons(ctx, segment, limit, dry_run):
         return
 
     telegram_config = TelegramConfig.from_env()
-    sent = 0
 
+    # Build sales list with required fields
+    sales_list = []
     for row in rows:
-        success = send_review_with_buttons(
-            telegram_config,
-            sale_id=row['sale_id'],
-            address=f"{row['address']}, {row['suburb']}",
-            price=row['price'],
-            area_sqm=row['area_sqm'],
-            zoning=row['zoning'],
-            year_built=row['year_built'],
-            segment_code=segment,
-        )
-        if success:
-            sent += 1
-            click.echo(f"  Sent: {row['address']}")
-            # Mark as sent so it won't be re-sent on next run
-            now = datetime.now(timezone.utc).isoformat()
-            db.execute(
-                "UPDATE sale_classifications SET review_sent_at = ? WHERE sale_id = ?",
-                (now, row['sale_id'])
-            )
+        # Create label fields
+        zoning_label = row['zoning'] if row['zoning'] else "Zoning unverified"
+        year_built_label = f"Built {row['year_built']}" if row['year_built'] else "Year unknown"
 
-    click.echo(f"\nSent {sent}/{len(rows)} review requests")
+        sales_list.append({
+            'sale_id': row['sale_id'],
+            'address': f"{row['address']}, {row['suburb']}",
+            'price': row['price'],
+            'area_sqm': row['area_sqm'],
+            'zoning_label': zoning_label,
+            'year_built_label': year_built_label,
+            'listing_url': row['listing_url'],
+        })
+
+    # Split into chunks of max 5 sales
+    chunk_size = 5
+    total_sent = 0
+
+    for i in range(0, len(sales_list), chunk_size):
+        chunk = sales_list[i:i + chunk_size]
+        success = send_review_digest(config, seg.display_name, chunk, segment)
+
+        if success:
+            # Mark all sales in this chunk as sent
+            now = datetime.now(timezone.utc).isoformat()
+            for sale in chunk:
+                db.execute(
+                    "UPDATE sale_classifications SET review_sent_at = ? WHERE sale_id = ?",
+                    (now, sale['sale_id'])
+                )
+                total_sent += 1
+            click.echo(f"  Sent digest with {len(chunk)} sales")
+
+    click.echo(f"\nSent {total_sent}/{len(rows)} sales in {(len(sales_list) + chunk_size - 1) // chunk_size} digest(s)")
     db.close()
 
 
