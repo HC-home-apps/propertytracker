@@ -1107,43 +1107,11 @@ def review_buttons(ctx, segment, limit, dry_run):
     if not seg:
         raise click.ClickException(f"Unknown segment: {segment}")
 
-    # Get pending sales from both VG and provisional sources
+    # Get pending provisional sales (recent sold listings from Domain API)
     suburbs = list(seg.suburbs)
     placeholders = ','.join(['?' for _ in suburbs])
 
-    # Query 1: VG sales (enriched, from sale_classifications)
-    vg_query = f"""
-        SELECT
-            sc.sale_id,
-            r.house_number || ' ' || r.street_name as address,
-            r.suburb,
-            r.purchase_price as price,
-            r.area_sqm,
-            sc.zoning,
-            sc.year_built,
-            sc.listing_url,
-            NULL as bedrooms,
-            NULL as bathrooms,
-            NULL as car_spaces,
-            NULL as source_site,
-            NULL as sold_date,
-            'vg' as source_type
-        FROM sale_classifications sc
-        JOIN raw_sales r ON sc.sale_id = r.dealing_number
-        WHERE sc.review_status = 'pending'
-          AND sc.is_auto_excluded = 0
-          AND sc.review_sent_at IS NULL
-          AND LOWER(r.suburb) IN ({placeholders})
-          AND r.property_type = ?
-          AND date(r.contract_date) >= date('now', '-6 months')
-        ORDER BY r.contract_date DESC
-        LIMIT ?
-    """
-    vg_params = list(suburbs) + [seg.property_type, limit]
-    vg_rows = db.query(vg_query, tuple(vg_params))
-
-    # Query 2: Provisional sales (from Google/Domain search)
-    prov_query = f"""
+    query = f"""
         SELECT
             id as sale_id,
             COALESCE(house_number, '') || ' ' || COALESCE(street_name, '') as address,
@@ -1168,42 +1136,35 @@ def review_buttons(ctx, segment, limit, dry_run):
           AND property_type = ?
           AND date(sold_date) >= date('now', '-30 days')
     """
-    prov_params = list(suburbs) + [seg.property_type]
+    params = list(suburbs) + [seg.property_type]
 
     # Apply segment-specific filters available on provisional_sales
     if seg.bedrooms is not None:
-        prov_query += " AND bedrooms = ?"
-        prov_params.append(seg.bedrooms)
+        query += " AND bedrooms = ?"
+        params.append(seg.bedrooms)
     if seg.bathrooms is not None:
-        prov_query += " AND bathrooms = ?"
-        prov_params.append(seg.bathrooms)
+        query += " AND bathrooms = ?"
+        params.append(seg.bathrooms)
     if seg.car_spaces is not None:
-        prov_query += " AND car_spaces = ?"
-        prov_params.append(seg.car_spaces)
+        query += " AND car_spaces = ?"
+        params.append(seg.car_spaces)
 
-    prov_query += " ORDER BY sold_date DESC LIMIT ?"
-    prov_params.append(limit)
+    query += " ORDER BY sold_date DESC LIMIT ?"
+    params.append(limit)
 
-    prov_rows = db.query(prov_query, tuple(prov_params))
-
-    # Combine: provisional first (most recent), then VG, up to limit
-    all_rows = list(prov_rows) + list(vg_rows)
-    all_rows = all_rows[:limit]
+    all_rows = db.query(query, tuple(params))
 
     if not all_rows:
         click.echo("No sales pending review")
         db.close()
         return
 
-    prov_count = sum(1 for r in all_rows if r['source_type'] == 'provisional')
-    vg_count = len(all_rows) - prov_count
-    click.echo(f"Sending {len(all_rows)} sales for review ({prov_count} provisional, {vg_count} VG)...")
+    click.echo(f"Sending {len(all_rows)} recent sold listings for review...")
 
     if dry_run:
         for row in all_rows:
-            src = "[PROV]" if row['source_type'] == 'provisional' else "[VG]"
             price = row['price'] or 0
-            click.echo(f"  {src} Would send: {row['address'].strip()}, {row['suburb']} - ${price:,}")
+            click.echo(f"  Would send: {row['address'].strip()}, {row['suburb']} - ${price:,}")
         db.close()
         return
 
@@ -1212,29 +1173,25 @@ def review_buttons(ctx, segment, limit, dry_run):
     # Build sales list with required fields
     sales_list = []
     for row in all_rows:
-        if row['source_type'] == 'vg':
-            zoning_label = row['zoning'] if row['zoning'] else "Zoning unverified"
-            year_built_label = f"Built {row['year_built']}" if row['year_built'] else "Year unknown"
+        # Use beds/baths/car info
+        parts = []
+        if row['bedrooms'] is not None:
+            parts.append(f"{row['bedrooms']}bed")
+        if row['bathrooms'] is not None:
+            parts.append(f"{row['bathrooms']}bath")
+        if row['car_spaces'] is not None:
+            parts.append(f"{row['car_spaces']}car")
+        zoning_label = "/".join(parts) if parts else "Details unknown"
+        # Show sold date
+        if row['sold_date']:
+            from datetime import datetime as dt
+            try:
+                d = dt.strptime(row['sold_date'], '%Y-%m-%d')
+                year_built_label = f"Sold {d.strftime('%-d %b %Y')}"
+            except (ValueError, TypeError):
+                year_built_label = f"Sold {row['sold_date']}"
         else:
-            # Provisional: use beds/baths/car info
-            parts = []
-            if row['bedrooms'] is not None:
-                parts.append(f"{row['bedrooms']}bed")
-            if row['bathrooms'] is not None:
-                parts.append(f"{row['bathrooms']}bath")
-            if row['car_spaces'] is not None:
-                parts.append(f"{row['car_spaces']}car")
-            zoning_label = "/".join(parts) if parts else "Details unknown"
-            # Show sold date for provisional
-            if row['sold_date']:
-                from datetime import datetime as dt
-                try:
-                    d = dt.strptime(row['sold_date'], '%Y-%m-%d')
-                    year_built_label = f"Sold {d.strftime('%-d %b %Y')}"
-                except (ValueError, TypeError):
-                    year_built_label = f"Sold {row['sold_date']}"
-            else:
-                year_built_label = row['source_site'] or "Google"
+            year_built_label = row['source_site'] or "Domain"
 
         sales_list.append({
             'sale_id': row['sale_id'],
@@ -1256,19 +1213,13 @@ def review_buttons(ctx, segment, limit, dry_run):
         success = send_review_digest(telegram_config, seg.display_name, chunk, segment)
 
         if success:
-            # Mark all sales in this chunk as sent (route to correct table)
+            # Mark all sales in this chunk as sent
             now = datetime.now(timezone.utc).isoformat()
             for sale in chunk:
-                if sale.get('source_type') == 'provisional':
-                    db.execute(
-                        "UPDATE provisional_sales SET review_sent_at = ? WHERE id = ?",
-                        (now, sale['sale_id'])
-                    )
-                else:
-                    db.execute(
-                        "UPDATE sale_classifications SET review_sent_at = ? WHERE sale_id = ?",
-                        (now, sale['sale_id'])
-                    )
+                db.execute(
+                    "UPDATE provisional_sales SET review_sent_at = ? WHERE id = ?",
+                    (now, sale['sale_id'])
+                )
                 total_sent += 1
             click.echo(f"  Sent digest with {len(chunk)} sales")
 

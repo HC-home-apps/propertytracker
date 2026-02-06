@@ -75,9 +75,9 @@ class TestReviewButtonsDigest:
     @patch('tracker.cli.Database')
     @patch('tracker.cli.load_config')
     @patch('tracker.cli.init_segments')
-    def test_dry_run_shows_both_sources(self, mock_init_seg, mock_config, mock_db_cls,
-                                        mock_segments):
-        """Dry run should label provisional and VG sales differently."""
+    def test_dry_run_shows_provisional_sales(self, mock_init_seg, mock_config, mock_db_cls,
+                                              mock_segments):
+        """Dry run should show provisional sales for review."""
         mock_config.return_value = {'segments': {}}
 
         mock_db = MagicMock()
@@ -92,27 +92,25 @@ class TestReviewButtonsDigest:
         mock_segment.car_spaces = None
         mock_segments.get.return_value = mock_segment
 
-        # First call: VG rows, second call: provisional rows
-        mock_db.query.side_effect = [
-            [
-                {'sale_id': 'A1', 'address': '15 Smith St', 'suburb': 'Revesby',
-                 'price': 850000, 'area_sqm': 450, 'zoning': 'R2',
-                 'year_built': 1965, 'listing_url': None,
-                 'bedrooms': None, 'bathrooms': None, 'car_spaces': None,
-                 'source_site': None, 'sold_date': None, 'source_type': 'vg'},
-            ],
-            [
-                {'sale_id': 'google-123', 'address': '20 Jones Ave', 'suburb': 'Revesby',
-                 'price': 920000, 'area_sqm': None, 'zoning': None,
-                 'year_built': None, 'listing_url': 'https://domain.com.au/xyz',
-                 'bedrooms': 3, 'bathrooms': 2, 'car_spaces': 1,
-                 'source_site': 'domain.com.au', 'sold_date': '2026-01-28',
-                 'source_type': 'provisional'},
-            ],
+        # Single query: provisional sales only
+        mock_db.query.return_value = [
+            {'sale_id': 'domain-123', 'address': '15 Smith St', 'suburb': 'Revesby',
+             'price': 850000, 'area_sqm': None, 'zoning': None,
+             'year_built': None, 'listing_url': 'https://domain.com.au/xyz',
+             'bedrooms': 3, 'bathrooms': 2, 'car_spaces': 1,
+             'source_site': 'domain.com.au', 'sold_date': '2026-01-28',
+             'source_type': 'provisional'},
+            {'sale_id': 'domain-456', 'address': '20 Jones Ave', 'suburb': 'Revesby',
+             'price': 920000, 'area_sqm': None, 'zoning': None,
+             'year_built': None, 'listing_url': 'https://domain.com.au/abc',
+             'bedrooms': 4, 'bathrooms': 2, 'car_spaces': 2,
+             'source_site': 'domain.com.au', 'sold_date': '2026-01-30',
+             'source_type': 'provisional'},
         ]
 
         runner = CliRunner()
         result = runner.invoke(cli, ['review-buttons', '--segment', 'revesby_houses', '--dry-run'])
 
-        assert '[PROV]' in result.output
-        assert '[VG]' in result.output
+        assert 'Would send: 15 Smith St, Revesby - $850,000' in result.output
+        assert 'Would send: 20 Jones Ave, Revesby - $920,000' in result.output
+        assert 'recent sold listings' in result.output

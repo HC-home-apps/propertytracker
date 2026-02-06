@@ -122,57 +122,42 @@ class TestFetchSoldListings:
         assert results == []
 
 
-class TestGoogleSearchFallback:
-    @patch('tracker.ingest.domain_sold.fetch_sold_listings_google')
-    def test_uses_google_when_no_api_key(self, mock_google):
-        mock_google.return_value = [{
-            'unit_number': None,
-            'house_number': '15',
-            'street_name': 'Alliance Ave',
-            'suburb': 'Revesby',
-            'postcode': '2212',
-            'sold_price': 1420000,
-            'sold_date': '2026-02-03',
-            'bedrooms': 3,
-            'bathrooms': 2,
-            'car_spaces': 2,
-            'listing_url': 'https://www.domain.com.au/15-alliance-ave-abc123',
-            'source_site': 'domain.com.au',
-            'address_normalised': '|15|alliance ave|revesby|2212',
-            'price_withheld': False,
-            'property_type': 'house',
-        }]
+class TestFetchSoldListingsFiltering:
+    @patch('tracker.ingest.domain_sold.requests.get')
+    def test_filters_by_property_type(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                'id': 22222,
+                'unitNumber': None,
+                'streetNumber': '15',
+                'streetName': 'Alliance',
+                'streetType': 'Avenue',
+                'suburb': 'Revesby',
+                'postcode': '2212',
+                'propertyType': 'House',
+                'price': 1420000,
+                'soldDate': '2026-02-03',
+            },
+            {
+                'id': 33333,
+                'unitNumber': '3',
+                'streetNumber': '10',
+                'streetName': 'Test',
+                'streetType': 'Road',
+                'suburb': 'Revesby',
+                'postcode': '2212',
+                'propertyType': 'ApartmentUnitFlat',
+                'price': 800000,
+                'soldDate': '2026-01-15',
+            },
+        ]
+        mock_get.return_value = mock_response
 
         results = fetch_sold_listings(
-            suburb='Revesby', property_type='house', postcode='2212', api_key=None,
+            suburb='Revesby', property_type='house', postcode='2212', api_key='test-key',
         )
+        # Should only return the house, not the unit
         assert len(results) == 1
-        assert results[0]['listing_url'] == 'https://www.domain.com.au/15-alliance-ave-abc123'
-        mock_google.assert_called_once()
-
-    @patch('tracker.ingest.domain_sold.fetch_sold_listings_google')
-    def test_handles_price_withheld(self, mock_google):
-        mock_google.return_value = [{
-            'unit_number': None,
-            'house_number': '10',
-            'street_name': 'Jones Ave',
-            'suburb': 'Revesby',
-            'postcode': '2212',
-            'sold_price': None,
-            'sold_date': None,
-            'bedrooms': 3,
-            'bathrooms': None,
-            'car_spaces': None,
-            'listing_url': 'https://www.domain.com.au/10-jones-ave-abc456',
-            'source_site': 'domain.com.au',
-            'address_normalised': '|10|jones ave|revesby|2212',
-            'price_withheld': True,
-            'property_type': 'house',
-        }]
-
-        results = fetch_sold_listings(
-            suburb='Revesby', property_type='house', postcode='2212', api_key=None,
-        )
-        assert len(results) == 1
-        assert results[0]['sold_price'] is None
-        assert results[0].get('status') == 'price_withheld'
+        assert results[0]['id'] == 'domain-22222'

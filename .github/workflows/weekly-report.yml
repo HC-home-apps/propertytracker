@@ -187,11 +187,11 @@ jobs:
           fi
           python -m tracker ingest $FORCE_FLAG
 
-      - name: Step 1b - Ingest sold listings from Google search
+      - name: Step 1b - Ingest sold listings from Domain API
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
         run: |
-          python -m tracker ingest-google
+          python -m tracker ingest-domain
 
       - name: Step 1c - Match provisional sales to VG
         run: |
