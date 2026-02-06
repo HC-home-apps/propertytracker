@@ -99,3 +99,39 @@ class TestClassifySale:
         assert result['is_auto_excluded'] is False
         assert result['review_status'] == 'pending'
         assert result['use_in_median'] is False  # Until manually approved
+
+
+class TestEnrichmentErrorLabels:
+    """Test enrichment error labeling."""
+
+    @patch('tracker.enrich.pipeline.get_zoning')
+    @patch('tracker.enrich.pipeline.get_year_built')
+    def test_labels_unknown_year(self, mock_year, mock_zoning):
+        """Should label unknown year."""
+        mock_zoning.return_value = 'R2'
+        mock_year.return_value = None
+
+        enrichment = enrich_sale('15 Smith St', 'Revesby', '2212')
+        assert enrichment['year_built'] is None
+        assert enrichment['year_built_label'] == 'Year unknown'
+
+    @patch('tracker.enrich.pipeline.get_zoning')
+    def test_labels_unverified_zoning(self, mock_zoning):
+        """Should label unverified zoning."""
+        mock_zoning.return_value = None
+
+        enrichment = enrich_sale('15 Smith St', 'Revesby', '2212')
+        assert enrichment['zoning_label'] == 'Zoning unverified'
+
+    @patch('tracker.enrich.pipeline.get_zoning')
+    @patch('tracker.enrich.pipeline.get_year_built')
+    def test_labels_known_values(self, mock_year, mock_zoning):
+        """Should label known year and zoning."""
+        mock_zoning.return_value = 'R2'
+        mock_year.return_value = 1965
+
+        enrichment = enrich_sale('15 Smith St', 'Revesby', '2212', api_key='test-key')
+        assert enrichment['year_built'] == 1965
+        assert enrichment['year_built_label'] == 'Built 1965'
+        assert enrichment['zoning'] == 'R2'
+        assert enrichment['zoning_label'] == 'R2'

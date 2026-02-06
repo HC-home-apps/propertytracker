@@ -49,10 +49,16 @@ def enrich_sale(
     # Scan for exclude keywords
     has_keywords = has_exclude_keywords(description)
 
+    # Create labels for display
+    year_built_label = f"Built {year_built}" if year_built else "Year unknown"
+    zoning_label = zoning if zoning else "Zoning unverified"
+
     return {
         'zoning': zoning,
         'year_built': year_built,
         'has_duplex_keywords': has_keywords,
+        'year_built_label': year_built_label,
+        'zoning_label': zoning_label,
     }
 
 
@@ -117,9 +123,11 @@ def process_pending_sales(
 
     query = f"""
         SELECT r.id, r.dealing_number, r.house_number, r.street_name,
-               r.suburb, r.postcode, r.area_sqm
+               r.suburb, r.postcode, r.area_sqm, r.address_normalised,
+               ps.listing_url
         FROM raw_sales r
         LEFT JOIN sale_classifications sc ON r.dealing_number = sc.sale_id
+        LEFT JOIN provisional_sales ps ON ps.vg_dealing_number = r.dealing_number AND ps.status = 'confirmed'
         WHERE sc.sale_id IS NULL
           AND LOWER(r.suburb) IN ({placeholders})
           AND r.property_type = ?
@@ -167,12 +175,21 @@ def process_pending_sales(
             # Classify
             classification = classify_sale(enrichment)
 
+            # Construct listing_url: use provisional_sales URL if available, else Google search fallback
+            listing_url = sale.get('listing_url')
+            if not listing_url:
+                # Google search fallback
+                from urllib.parse import quote_plus
+                search_query = quote_plus(f"{address} {sale['suburb']} sold")
+                listing_url = f"https://www.google.com/search?q={search_query}"
+
             # Save to database
             db.execute("""
                 INSERT INTO sale_classifications (
                     sale_id, address, zoning, year_built, has_duplex_keywords,
-                    is_auto_excluded, auto_exclude_reason, review_status, use_in_median
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_auto_excluded, auto_exclude_reason, review_status, use_in_median,
+                    listing_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 sale['dealing_number'],
                 f"{address}, {sale['suburb']}",
@@ -183,6 +200,7 @@ def process_pending_sales(
                 classification['auto_exclude_reason'],
                 classification['review_status'],
                 classification['use_in_median'],
+                listing_url,
             ))
 
             processed += 1
