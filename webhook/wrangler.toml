@@ -1,0 +1,6 @@
+name = "propertytracker-webhook"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+
+[vars]
+GITHUB_REPO = "HC-home-apps/propertytracker"

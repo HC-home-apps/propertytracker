@@ -1,18 +1,18 @@
-name: Poll Review Responses
+name: Process Review Response
 
 on:
-  # Run every 6 hours to catch button taps before Telegram expires them (~24h)
-  schedule:
-    - cron: '0 */6 * * *'
+  # Triggered by Cloudflare Worker webhook when user taps a button
+  repository_dispatch:
+    types: [review-response]
 
-  # Manual trigger
+  # Manual trigger (fallback)
   workflow_dispatch: {}
 
 env:
   PYTHON_VERSION: '3.11'
 
 jobs:
-  poll-reviews:
+  update-review:
     runs-on: ubuntu-latest
 
     steps:
@@ -44,7 +44,41 @@ jobs:
           segments: {}
           EOF
 
-      - name: Process review responses
+      - name: Process review response
+        if: github.event_name == 'repository_dispatch'
+        env:
+          SALE_ID: ${{ github.event.client_payload.sale_id }}
+          RESPONSE: ${{ github.event.client_payload.response }}
+          SEGMENT_CODE: ${{ github.event.client_payload.segment_code }}
+        run: |
+          python -c "
+          import os
+          from datetime import datetime, timezone
+          from tracker.db import Database
+
+          db = Database('data/tracker.db')
+          db.init_schema()
+
+          sale_id = os.environ['SALE_ID']
+          response = os.environ['RESPONSE']
+          segment = os.environ.get('SEGMENT_CODE', '')
+
+          status = 'comparable' if response == 'yes' else 'not_comparable'
+          use_in_median = 1 if response == 'yes' else 0
+          now = datetime.now(timezone.utc).isoformat()
+
+          result = db.execute('''
+              UPDATE sale_classifications
+              SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
+              WHERE sale_id = ?
+          ''', (status, use_in_median, now, now, sale_id))
+
+          print(f'{sale_id} ({segment}): {status} (rows updated: {result})')
+          db.close()
+          "
+
+      - name: Manual poll (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
