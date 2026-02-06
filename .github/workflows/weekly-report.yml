@@ -201,6 +201,7 @@ jobs:
         if: github.event.inputs.run_enrich != 'false'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
         run: |
           python -m tracker enrich --segment revesby_houses --limit 20
 
@@ -208,6 +209,7 @@ jobs:
         if: github.event.inputs.run_enrich != 'false'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
         run: |
           python -m tracker enrich --segment wollstonecraft_units --limit 20
 

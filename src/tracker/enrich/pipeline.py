@@ -39,7 +39,7 @@ def enrich_sale(
     """
     # Get zoning from NSW Planning Portal
     full_address = f"{address}, {suburb} NSW {postcode}"
-    zoning = get_zoning(full_address)
+    zoning = get_zoning(full_address, street_address=address, suburb=suburb, postcode=postcode)
 
     # Get year built from Domain API (if key provided)
     year_built = None

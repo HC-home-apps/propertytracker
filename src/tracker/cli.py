@@ -784,7 +784,8 @@ def pending(ctx, segment):
     click.echo(f"{len(rows)} sales pending review:\n")
     for i, row in enumerate(rows, 1):
         click.echo(f"{i}. {row['address']}")
-        click.echo(f"   ${row['purchase_price']:,} | {row['area_sqm']:.0f}sqm | {row['zoning'] or 'Unknown'} | {row['year_built'] or 'Year unknown'}")
+        area_str = f"{row['area_sqm']:.0f}sqm" if row['area_sqm'] else "N/A"
+        click.echo(f"   ${row['purchase_price']:,} | {area_str} | {row['zoning'] or 'Unknown'} | {row['year_built'] or 'Year unknown'}")
         click.echo()
 
     db.close()
@@ -1134,6 +1135,7 @@ def review_buttons(ctx, segment, limit, dry_run):
           AND sc.review_sent_at IS NULL
           AND LOWER(r.suburb) IN ({placeholders})
           AND r.property_type = ?
+          AND date(r.contract_date) >= date('now', '-6 months')
         ORDER BY r.contract_date DESC
         LIMIT ?
     """
