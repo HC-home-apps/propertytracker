@@ -174,6 +174,126 @@ def send_review_with_buttons(
         return False
 
 
+def format_review_digest(segment_name: str, sales: List[dict]) -> str:
+    """
+    Format a review digest message with clickable address links.
+
+    Args:
+        segment_name: Human-readable segment name (e.g., "Revesby Houses")
+        sales: List of sale dicts with keys: sale_id, address, price, area_sqm,
+               zoning_label, year_built_label, listing_url
+
+    Returns:
+        HTML-formatted digest message
+    """
+    from tracker.compute.equity import format_currency
+    from urllib.parse import quote_plus
+
+    count = len(sales)
+    lines = [f"📋 <b>{segment_name}</b> — {count} to review\n"]
+
+    for idx, sale in enumerate(sales, 1):
+        address = sale['address']
+        price = sale['price']
+        area_sqm = sale.get('area_sqm')
+        zoning_label = sale.get('zoning_label', 'Unknown')
+        year_built_label = sale.get('year_built_label', 'Year unknown')
+        listing_url = sale.get('listing_url')
+
+        # Use listing_url if available, else construct Google search fallback
+        if not listing_url:
+            search_query = quote_plus(f"{address} sold")
+            listing_url = f"https://www.google.com/search?q={search_query}"
+
+        # Format area
+        area_str = f" ({area_sqm:.0f}sqm)" if area_sqm else ""
+
+        # Build line with clickable address link
+        line = (
+            f"{idx}. <a href=\"{listing_url}\">{address}</a>{area_str}\n"
+            f"   {format_currency(price)} · {zoning_label} · {year_built_label}"
+        )
+        lines.append(line)
+
+    return "\n\n".join(lines)
+
+
+def build_digest_keyboard(sale_ids: List[tuple], segment_code: str) -> dict:
+    """
+    Build inline keyboard for digest review with individual + bulk buttons.
+
+    Args:
+        sale_ids: List of (sale_id, segment_code) tuples (max 5)
+        segment_code: Segment code
+
+    Returns:
+        Telegram inline keyboard dict with one row per sale + bulk row
+    """
+    rows = []
+
+    # One row per sale
+    for idx, (sale_id, _) in enumerate(sale_ids, 1):
+        rows.append([
+            {"text": f"{idx} ✅", "callback_data": f"review:{segment_code}:{sale_id}:yes"},
+            {"text": f"{idx} ❌", "callback_data": f"review:{segment_code}:{sale_id}:no"},
+        ])
+
+    # Bulk row
+    rows.append([
+        {"text": "All ✅", "callback_data": f"review:{segment_code}:all:yes"},
+        {"text": "All ❌", "callback_data": f"review:{segment_code}:all:no"},
+    ])
+
+    return {"inline_keyboard": rows}
+
+
+def send_review_digest(
+    config: TelegramConfig,
+    segment_name: str,
+    sales: List[dict],
+    segment_code: str,
+) -> bool:
+    """
+    Send a batched review digest with inline keyboard.
+
+    Args:
+        config: Telegram configuration
+        segment_name: Human-readable segment name
+        sales: List of sales (max 5 per message)
+        segment_code: Segment code
+
+    Returns:
+        True if successful
+    """
+    if not sales:
+        return False
+
+    url = f"{TELEGRAM_API_BASE}{config.bot_token}/sendMessage"
+
+    # Format message
+    message = format_review_digest(segment_name, sales)
+
+    # Build keyboard
+    sale_ids = [(s['sale_id'], segment_code) for s in sales]
+    keyboard = build_digest_keyboard(sale_ids, segment_code)
+
+    payload = {
+        'chat_id': config.chat_id,  # Reviews go to personal chat
+        'text': message,
+        'parse_mode': 'HTML',
+        'reply_markup': keyboard,
+        'disable_web_page_preview': True,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Failed to send review digest: {e}")
+        return False
+
+
 def get_callback_updates(config: TelegramConfig, offset: Optional[int] = None) -> List[dict]:
     """
     Poll for callback query updates from button presses.
