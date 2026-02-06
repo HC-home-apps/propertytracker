@@ -149,6 +149,7 @@ function extractSaleIds(keyboard, segmentCode) {
 /**
  * Add verdict emoji to a specific line number in the message.
  * Example: "1. <a href=...>15 Alliance Ave</a>" → "1. ✅ <a href=...>15 Alliance Ave</a>"
+ * Prevents duplicate emojis by checking if one already exists.
  */
 function addVerdictToMessage(text, lineNumber, emoji) {
   const lines = text.split('\n');
@@ -156,6 +157,10 @@ function addVerdictToMessage(text, lineNumber, emoji) {
     // Check if this line starts with the number we're looking for
     const regex = new RegExp(`^${lineNumber}\\.\\s`);
     if (regex.test(line)) {
+      // Check if emoji already exists (either ✅ or ❌)
+      if (line.includes('✅') || line.includes('❌')) {
+        return line; // Already has an emoji, don't add another
+      }
       return line.replace(regex, `${lineNumber}. ${emoji} `);
     }
     return line;
@@ -166,12 +171,17 @@ function addVerdictToMessage(text, lineNumber, emoji) {
 /**
  * Add verdict emoji to all numbered lines in the message.
  * Example: "1. <a href=...>..." → "1. ✅ <a href=...>..."
+ * Prevents duplicate emojis by checking if one already exists.
  */
 function addVerdictToAllLines(text, emoji) {
   const lines = text.split('\n');
   const updatedLines = lines.map(line => {
     // Match lines starting with a number followed by a period
     if (/^\d+\.\s/.test(line)) {
+      // Check if emoji already exists (either ✅ or ❌)
+      if (line.includes('✅') || line.includes('❌')) {
+        return line; // Already has an emoji, don't add another
+      }
       return line.replace(/^(\d+)\.\s/, `$1. ${emoji} `);
     }
     return line;

@@ -1127,6 +1127,7 @@ def review_buttons(ctx, segment, limit, dry_run):
           AND sc.review_sent_at IS NULL
           AND LOWER(r.suburb) IN ({placeholders})
           AND r.property_type = ?
+          AND date(r.contract_date) >= date('now', '-7 days')
         ORDER BY r.contract_date DESC
         LIMIT ?
     """
