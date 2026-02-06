@@ -39,6 +39,9 @@ ENV/
 .coverage.*
 htmlcov/
 
+# Worktrees
+.worktrees/
+
 # Project specific
 data/tracker.db
 data/raw/
