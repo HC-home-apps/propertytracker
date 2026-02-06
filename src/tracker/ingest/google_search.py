@@ -428,14 +428,26 @@ def fetch_sold_listings_google(
         # DDG HTML version uses POST with form data
         data = {'q': query}
 
-        response = requests.post(
-            DDG_SEARCH_URL,
-            headers=headers,
-            data=data,
-            timeout=30,
-        )
+        # Retry once on 202 (CAPTCHA/rate limit) with longer backoff
+        max_attempts = 2
+        response = None
+        for attempt in range(max_attempts):
+            response = requests.post(
+                DDG_SEARCH_URL,
+                headers=headers,
+                data=data,
+                timeout=30,
+            )
 
-        if response.status_code != 200:
+            if response.status_code == 200:
+                break
+
+            if response.status_code == 202 and attempt < max_attempts - 1:
+                backoff = random.uniform(60.0, 90.0)
+                logger.info(f"DDG returned 202 (rate limit), retrying in {backoff:.0f}s...")
+                time.sleep(backoff)
+                continue
+
             logger.warning(f"DuckDuckGo returned HTTP {response.status_code} for query: {query}")
             return []
 
