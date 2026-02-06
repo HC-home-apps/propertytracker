@@ -261,6 +261,37 @@ class Database:
             ON sale_classifications(use_in_median)
         """)
 
+        # 8. provisional_sales - Sold listings from Domain API (unconfirmed)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS provisional_sales (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                unit_number TEXT,
+                house_number TEXT,
+                street_name TEXT,
+                suburb TEXT NOT NULL,
+                postcode TEXT,
+                property_type TEXT CHECK(property_type IN ('house', 'unit', 'land', 'other')),
+                sold_price INTEGER,
+                sold_date DATE,
+                address_normalised TEXT,
+                matched_dealing_number TEXT,
+                status TEXT DEFAULT 'unconfirmed'
+                    CHECK(status IN ('unconfirmed', 'confirmed', 'superseded')),
+                raw_json TEXT,
+                ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_provisional_sales_status
+            ON provisional_sales(status)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_provisional_sales_suburb
+            ON provisional_sales(suburb, sold_date)
+        """)
+
         conn.commit()
 
     def upsert_raw_sales(self, sales: List[dict]) -> int:
@@ -378,3 +409,56 @@ class Database:
                 """
             )
         return rows[0] if rows else None
+
+    def upsert_provisional_sales(self, sales: list) -> int:
+        """Insert provisional sales, ignoring duplicates. Returns count of new records."""
+        if not sales:
+            return 0
+
+        sql = """
+            INSERT OR IGNORE INTO provisional_sales (
+                id, source, unit_number, house_number, street_name,
+                suburb, postcode, property_type, sold_price, sold_date,
+                address_normalised, raw_json
+            ) VALUES (
+                :id, :source, :unit_number, :house_number, :street_name,
+                :suburb, :postcode, :property_type, :sold_price, :sold_date,
+                :address_normalised, :raw_json
+            )
+        """
+
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        inserted = 0
+
+        for sale in sales:
+            cursor.execute(sql, sale)
+            if cursor.rowcount > 0:
+                inserted += 1
+
+        conn.commit()
+        return inserted
+
+    def get_unconfirmed_provisional_sales(self, suburb: str = None) -> list:
+        """Get unconfirmed provisional sales, optionally filtered by suburb."""
+        if suburb:
+            return self.query(
+                """SELECT * FROM provisional_sales
+                   WHERE status = 'unconfirmed' AND LOWER(suburb) = LOWER(?)
+                   ORDER BY sold_date DESC""",
+                (suburb,)
+            )
+        return self.query(
+            """SELECT * FROM provisional_sales
+               WHERE status = 'unconfirmed'
+               ORDER BY sold_date DESC"""
+        )
+
+    def mark_provisional_confirmed(self, provisional_id: str, dealing_number: str):
+        """Link a provisional sale to a VG record."""
+        self.execute(
+            """UPDATE provisional_sales
+               SET status = 'confirmed', matched_dealing_number = ?
+               WHERE id = ?""",
+            (dealing_number, provisional_id)
+        )

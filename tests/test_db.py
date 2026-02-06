@@ -221,3 +221,127 @@ class TestSaleClassificationsTable:
         assert rows[0]['review_status'] == 'pending'
         assert rows[0]['use_in_median'] == 0  # Default FALSE
         db.close()
+
+
+class TestProvisionalSalesTable:
+    """Test provisional_sales table operations."""
+
+    def test_table_exists(self, db):
+        """provisional_sales table should be created by init_schema."""
+        tables = db.list_tables()
+        assert 'provisional_sales' in tables
+
+    def test_insert_provisional_sale(self, db):
+        """Should insert a provisional sale record."""
+        inserted = db.upsert_provisional_sales([{
+            'id': 'domain-12345',
+            'source': 'domain',
+            'unit_number': '9',
+            'house_number': '27-29',
+            'street_name': 'Morton St',
+            'suburb': 'Wollstonecraft',
+            'postcode': '2065',
+            'property_type': 'unit',
+            'sold_price': 1200000,
+            'sold_date': '2026-02-03',
+            'address_normalised': '9|27-29|morton st|wollstonecraft|2065',
+            'raw_json': '{"test": true}',
+        }])
+        assert inserted == 1
+
+    def test_provisional_dedup_on_id(self, db):
+        """Should ignore duplicate provisional sales by id."""
+        sale = {
+            'id': 'domain-12345',
+            'source': 'domain',
+            'unit_number': '9',
+            'house_number': '27-29',
+            'street_name': 'Morton St',
+            'suburb': 'Wollstonecraft',
+            'postcode': '2065',
+            'property_type': 'unit',
+            'sold_price': 1200000,
+            'sold_date': '2026-02-03',
+            'address_normalised': '9|27-29|morton st|wollstonecraft|2065',
+            'raw_json': '{}',
+        }
+        db.upsert_provisional_sales([sale])
+        inserted = db.upsert_provisional_sales([sale])
+        assert inserted == 0
+
+    def test_get_unconfirmed_provisional(self, db):
+        """Should return only unconfirmed provisional sales."""
+        db.upsert_provisional_sales([{
+            'id': 'domain-111',
+            'source': 'domain',
+            'unit_number': None,
+            'house_number': '10',
+            'street_name': 'Smith St',
+            'suburb': 'Wollstonecraft',
+            'postcode': '2065',
+            'property_type': 'unit',
+            'sold_price': 900000,
+            'sold_date': '2026-01-15',
+            'address_normalised': '|10|smith st|wollstonecraft|2065',
+            'raw_json': '{}',
+        }])
+        results = db.get_unconfirmed_provisional_sales()
+        assert len(results) == 1
+        assert results[0]['id'] == 'domain-111'
+        assert results[0]['status'] == 'unconfirmed'
+
+    def test_mark_provisional_confirmed(self, db):
+        """Should link provisional sale to VG dealing number."""
+        db.upsert_provisional_sales([{
+            'id': 'domain-222',
+            'source': 'domain',
+            'unit_number': None,
+            'house_number': '10',
+            'street_name': 'Smith St',
+            'suburb': 'Wollstonecraft',
+            'postcode': '2065',
+            'property_type': 'unit',
+            'sold_price': 900000,
+            'sold_date': '2026-01-15',
+            'address_normalised': '|10|smith st|wollstonecraft|2065',
+            'raw_json': '{}',
+        }])
+        db.mark_provisional_confirmed('domain-222', 'AU123456')
+        results = db.get_unconfirmed_provisional_sales()
+        assert len(results) == 0
+
+    def test_get_provisional_for_report(self, db):
+        """Should return unconfirmed sales filtered by suburb."""
+        db.upsert_provisional_sales([
+            {
+                'id': 'domain-aaa',
+                'source': 'domain',
+                'unit_number': '9',
+                'house_number': '27',
+                'street_name': 'Morton St',
+                'suburb': 'Wollstonecraft',
+                'postcode': '2065',
+                'property_type': 'unit',
+                'sold_price': 1200000,
+                'sold_date': '2026-02-03',
+                'address_normalised': '9|27|morton st|wollstonecraft|2065',
+                'raw_json': '{}',
+            },
+            {
+                'id': 'domain-bbb',
+                'source': 'domain',
+                'unit_number': None,
+                'house_number': '5',
+                'street_name': 'Smith St',
+                'suburb': 'Revesby',
+                'postcode': '2212',
+                'property_type': 'house',
+                'sold_price': 1500000,
+                'sold_date': '2026-02-01',
+                'address_normalised': '|5|smith st|revesby|2212',
+                'raw_json': '{}',
+            },
+        ])
+        results = db.get_unconfirmed_provisional_sales(suburb='Wollstonecraft')
+        assert len(results) == 1
+        assert results[0]['suburb'] == 'Wollstonecraft'

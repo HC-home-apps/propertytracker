@@ -2,12 +2,25 @@ import pytest
 import tempfile
 import os
 
+from tracker.db import Database
+
 @pytest.fixture
 def temp_db():
     """Provide a temporary database path."""
     with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
         yield f.name
     os.unlink(f.name)
+
+@pytest.fixture
+def db():
+    """Provide an initialised Database instance backed by a temp file."""
+    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+        path = f.name
+    database = Database(path)
+    database.init_schema()
+    yield database
+    database.close()
+    os.unlink(path)
 
 @pytest.fixture
 def sample_config():
