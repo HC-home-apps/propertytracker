@@ -452,8 +452,11 @@ def fetch_sold_listings_google(
         # DDG HTML version uses POST with form data
         data = {'q': query}
 
-        # Retry twice on 202 (CAPTCHA/rate limit) with long backoff
-        max_attempts = 3
+        # Keep retrying on 202 with escalating backoff until success or timeout.
+        # Backoff doubles each attempt: 60s, 120s, 240s (max 5 min).
+        # Total worst case ~7 min per query, but DDG usually relents within 2-3 tries.
+        max_attempts = 5
+        base_backoff = 60.0
         response = None
         for attempt in range(max_attempts):
             response = requests.post(
@@ -467,9 +470,12 @@ def fetch_sold_listings_google(
                 break
 
             if response.status_code == 202 and attempt < max_attempts - 1:
-                backoff = random.uniform(90.0, 120.0)
+                backoff = min(base_backoff * (2 ** attempt), 300.0)  # 60, 120, 240, 300
+                backoff = random.uniform(backoff * 0.8, backoff * 1.2)
                 logger.info(f"DDG returned 202 (rate limit), attempt {attempt + 1}/{max_attempts}, retrying in {backoff:.0f}s...")
                 time.sleep(backoff)
+                # Use a fresh user agent on retry
+                headers['User-Agent'] = random.choice(USER_AGENTS)
                 continue
 
             logger.warning(f"DuckDuckGo returned HTTP {response.status_code} for query: {query}")
