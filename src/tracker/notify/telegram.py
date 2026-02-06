@@ -88,6 +88,8 @@ def send_message(
 
     try:
         response = requests.post(url, json=payload, timeout=30)
+        if response.status_code != 200:
+            logger.error(f"Telegram API error {response.status_code}: {response.text}")
         response.raise_for_status()
         return True
     except requests.RequestException as e:
