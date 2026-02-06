@@ -113,7 +113,7 @@ export default {
     }
 
     // 4. Trigger GitHub Actions to update the database
-    if (env.GITHUB_TOKEN && env.GITHUB_REPO) {
+    if (env.GITHUB_TOKEN && env.GITHUB_REPO && saleIdsToUpdate.length > 0) {
       await triggerDbUpdate(
         env.GITHUB_TOKEN,
         env.GITHUB_REPO,
@@ -218,15 +218,19 @@ async function editMessage(botToken, chatId, messageId, newText, newKeyboard = n
     }
   }
 
-  await fetch(`${TELEGRAM_API}${botToken}/editMessageText`, {
+  const response = await fetch(`${TELEGRAM_API}${botToken}/editMessageText`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+
+  if (!response.ok) {
+    console.error(`Telegram API error: ${response.status}`, await response.text());
+  }
 }
 
 async function triggerDbUpdate(githubToken, repo, saleIds, response, segmentCode) {
-  await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
+  const apiResponse = await fetch(`https://api.github.com/repos/${repo}/dispatches`, {
     method: "POST",
     headers: {
       Authorization: `token ${githubToken}`,
@@ -242,4 +246,8 @@ async function triggerDbUpdate(githubToken, repo, saleIds, response, segmentCode
       },
     }),
   });
+
+  if (!apiResponse.ok) {
+    console.error(`GitHub API error: ${apiResponse.status}`, await apiResponse.text());
+  }
 }
