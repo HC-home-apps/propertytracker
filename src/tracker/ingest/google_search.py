@@ -96,6 +96,10 @@ def parse_search_results_html(html: str) -> List[dict]:
 
         title = link.get_text(strip=True)
 
+        # Skip aggregate titles (e.g. "19824 Properties sold in Revesby")
+        if _is_aggregate_title(title):
+            continue
+
         # Snippet: a.result__snippet
         snippet_el = div.select_one('a.result__snippet')
         snippet = snippet_el.get_text(strip=True) if snippet_el else ''
@@ -123,8 +127,20 @@ def _match_real_estate_domain(url: str) -> Optional[str]:
 
 def _is_aggregate_url(url: str) -> bool:
     """Check if a URL is an aggregate/category page rather than a single listing."""
-    aggregate_patterns = ['/sold-listings/', '/sale/', '/for-sale/', '/buy/']
+    aggregate_patterns = [
+        '/sold-listings/', '/sale/', '/for-sale/', '/buy/',
+        '/sold/in-',  # realestate.com.au aggregate (not /sold/property-*)
+        '/neighbourhood/', '/suburb-profile/',
+    ]
     return any(pattern in url for pattern in aggregate_patterns)
+
+
+def _is_aggregate_title(title: str) -> bool:
+    """Check if a search result title indicates an aggregate page, not a single listing."""
+    return bool(re.search(
+        r'\d+\s+(?:Free Standing\s+)?(?:Properties|Houses|Townhouses|Apartments|Units)\s+sold\s+in',
+        title, re.IGNORECASE,
+    ))
 
 
 def extract_listing_data(result: dict, suburb: str, postcode: str) -> dict:
@@ -456,7 +472,20 @@ def fetch_sold_listings_google(
 
         listings = []
         for result in raw_results:
+            # Validate that the searched suburb appears in the title
+            # (DDG may return results for similarly-named suburbs)
+            title = result.get('title', '')
+            if suburb and not re.search(r'\b' + re.escape(suburb) + r'\b', title, re.IGNORECASE):
+                logger.debug(f"Skipping result - suburb '{suburb}' not in title: {title[:80]}")
+                continue
+
             listing = extract_listing_data(result, suburb, postcode)
+
+            # Skip results with unparseable addresses (no house number)
+            if not listing.get('house_number'):
+                logger.debug(f"Skipping result - no address parsed from: {title[:80]}")
+                continue
+
             listings.append(listing)
 
         deduplicated = _deduplicate_results(listings)

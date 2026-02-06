@@ -10,6 +10,8 @@ from tracker.ingest.google_search import (
     extract_listing_data,
     _deduplicate_results,
     _parse_sold_date,
+    _is_aggregate_title,
+    _is_aggregate_url,
     fetch_sold_listings_google,
     REAL_ESTATE_DOMAINS,
 )
@@ -136,6 +138,76 @@ class TestParseSearchResultsHtml:
         assert len(results) == 1
         assert results[0]['snippet'] == ''
 
+    def test_filters_aggregate_titles(self):
+        """Should filter out results with aggregate titles like '19824 Properties sold in'."""
+        html = _wrap_results_page(
+            _make_ddg_result_html(
+                'https://www.domain.com.au/some-listing',
+                '19824 Properties sold in Revesby, NSW, 2212',
+                'View all sold properties.',
+            ),
+            _make_ddg_result_html(
+                'https://www.domain.com.au/sold-property-12345',
+                '10 Smith St, Revesby NSW 2212 - Sold',
+                'Sold $1,400,000',
+            ),
+        )
+        results = parse_search_results_html(html)
+        assert len(results) == 1
+        assert 'Smith St' in results[0]['title']
+
+    def test_filters_aggregate_url_sold_in(self):
+        """Should filter realestate.com.au /sold/in-* aggregate pages."""
+        html = _wrap_results_page(
+            _make_ddg_result_html(
+                'https://www.realestate.com.au/sold/in-revesby,+nsw+2212/',
+                '1185 Townhouses sold in Revesby',
+                'Browse sold properties.',
+            ),
+        )
+        results = parse_search_results_html(html)
+        assert len(results) == 0
+
+
+# ---------------------------------------------------------------------------
+# TestAggregateFiltering
+# ---------------------------------------------------------------------------
+
+class TestAggregateFiltering:
+    def test_aggregate_url_sold_listings(self):
+        assert _is_aggregate_url('https://domain.com.au/sold-listings/revesby-nsw-2212/') is True
+
+    def test_aggregate_url_sold_in(self):
+        assert _is_aggregate_url('https://realestate.com.au/sold/in-revesby/') is True
+
+    def test_individual_sold_listing_url(self):
+        """realestate.com.au /sold/property-* is an individual listing, not aggregate."""
+        assert _is_aggregate_url('https://realestate.com.au/sold/property-unit-nsw-wollstonecraft-12345') is False
+
+    def test_aggregate_url_for_sale(self):
+        assert _is_aggregate_url('https://domain.com.au/for-sale/revesby/') is True
+
+    def test_individual_listing_url(self):
+        assert _is_aggregate_url('https://domain.com.au/10-smith-st-revesby-nsw-2212-12345') is False
+
+    def test_aggregate_title_properties(self):
+        assert _is_aggregate_title('19824 Properties sold in Revesby, NSW, 2212') is True
+
+    def test_aggregate_title_houses(self):
+        assert _is_aggregate_title('12063 Houses sold in Revesby Heights') is True
+
+    def test_aggregate_title_townhouses(self):
+        assert _is_aggregate_title('1185 Townhouses sold in Revesby') is True
+
+    def test_aggregate_title_free_standing(self):
+        assert _is_aggregate_title('10463 Free Standing Houses sold in Revesby') is True
+
+    def test_normal_title_not_aggregate(self):
+        assert _is_aggregate_title('10 Smith St, Revesby NSW 2212 - Sold') is False
+
+    def test_sold_title_not_aggregate(self):
+        assert _is_aggregate_title('Sold 32 Beaconsfield Street, Revesby NSW 2212 on 30 Jan 2026') is False
+
 
 # ---------------------------------------------------------------------------
 # TestExtractListingData
@@ -229,6 +301,31 @@ class TestExtractListingData:
         assert listing['unit_number'] is None
         assert listing['house_number'] == '15'
         assert listing['street_name'] == 'Alliance Ave'
+
+    def test_address_parsing_sold_prefix(self):
+        """DDG titles from Domain start with 'Sold' prefix."""
+        result = {
+            'url': 'https://www.domain.com.au/listing',
+            'title': 'Sold 32 Beaconsfield Street, Revesby NSW 2212 on 30 Jan 2026',
+            'snippet': '4 bed 2 bath House sold for $1,550,000.',
+            'source_site': 'domain.com.au',
+        }
+        listing = extract_listing_data(result, 'Revesby', '2212')
+        assert listing['house_number'] == '32'
+        assert listing['street_name'] == 'Beaconsfield Street'
+
+    def test_address_parsing_unit_with_range(self):
+        """DDG titles with unit/range format like 6/13-17 River Road."""
+        result = {
+            'url': 'https://www.domain.com.au/listing',
+            'title': 'Sold 6/13-17 River Road, Wollstonecraft NSW 2065 on 06 Dec 2025',
+            'snippet': '2 bed 1 bath apartment sold for $1,100,000.',
+            'source_site': 'domain.com.au',
+        }
+        listing = extract_listing_data(result, 'Wollstonecraft', '2065')
+        assert listing['unit_number'] == '6'
+        assert listing['house_number'] == '13-17'
+        assert listing['street_name'] == 'River Road'
 
     def test_beds_baths_car_extraction(self):
         result = {
@@ -535,3 +632,54 @@ class TestFetchSoldListingsGoogle:
         assert results[0]['source_site'] == 'domain.com.au'
         # Merged bathrooms from realestate listing
         assert results[0]['bathrooms'] == 2
+
+    @patch('tracker.ingest.google_search.time.sleep')
+    @patch('tracker.ingest.google_search.requests.post')
+    def test_filters_wrong_suburb_results(self, mock_post, mock_sleep):
+        """Searching 'Revesby Heights' should not include Revesby results."""
+        html = _wrap_results_page(
+            _make_ddg_result_html(
+                'https://www.domain.com.au/32-beaconsfield-st-revesby-12345',
+                '32 Beaconsfield Street, Revesby NSW 2212 - Sold',
+                'Sold $1,550,000. 4 bed 2 bath.',
+            ),
+            _make_ddg_result_html(
+                'https://www.domain.com.au/10-smith-st-revesby-heights-12345',
+                '10 Smith St, Revesby Heights NSW 2212 - Sold',
+                'Sold $1,200,000. 3 bed 1 bath.',
+            ),
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = html
+        mock_post.return_value = mock_response
+
+        results = fetch_sold_listings_google('Revesby Heights', 'house', '2212')
+        # Should only include the Revesby Heights result
+        assert len(results) == 1
+        assert results[0]['street_name'] == 'Smith St'
+
+    @patch('tracker.ingest.google_search.time.sleep')
+    @patch('tracker.ingest.google_search.requests.post')
+    def test_skips_unparseable_addresses(self, mock_post, mock_sleep):
+        """Results with no parseable house number should be skipped."""
+        html = _wrap_results_page(
+            _make_ddg_result_html(
+                'https://www.domain.com.au/some-listing',
+                'Some random property in Revesby',
+                'No structured address data.',
+            ),
+            _make_ddg_result_html(
+                'https://www.domain.com.au/10-smith-st',
+                '10 Smith St, Revesby NSW 2212 - Sold',
+                'Sold $1,400,000.',
+            ),
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = html
+        mock_post.return_value = mock_response
+
+        results = fetch_sold_listings_google('Revesby', 'house', '2212')
+        assert len(results) == 1
+        assert results[0]['house_number'] == '10'
