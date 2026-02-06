@@ -1077,6 +1077,7 @@ def review_poll(ctx):
         TelegramConfig,
         get_callback_updates,
         answer_callback_query,
+        edit_message_remove_buttons,
     )
 
     config = load_config(ctx.obj['config_path'])
@@ -1138,6 +1139,21 @@ def review_poll(ctx):
 
         # Acknowledge callback
         answer_callback_query(telegram_config, callback_id, response_text)
+
+        # Remove buttons from the message and show result
+        msg = callback.get('message', {})
+        chat_id = msg.get('chat', {}).get('id')
+        message_id = msg.get('message_id')
+        original_text = msg.get('text', '')
+        if chat_id and message_id:
+            verdict = "YES - Comparable" if response == 'yes' else "NO - Not comparable"
+            new_text = original_text.replace(
+                "Is this comparable to your property?",
+                f"<b>{verdict}</b>",
+            )
+            edit_message_remove_buttons(
+                telegram_config, chat_id, message_id, new_text=new_text,
+            )
 
     # Clear processed updates by requesting with offset
     if max_update_id is not None:

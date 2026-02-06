@@ -235,6 +235,49 @@ def answer_callback_query(config: TelegramConfig, callback_query_id: str, text: 
         return False
 
 
+def edit_message_remove_buttons(
+    config: TelegramConfig,
+    chat_id: int,
+    message_id: int,
+    new_text: Optional[str] = None,
+) -> bool:
+    """
+    Remove inline keyboard buttons from a message and optionally update text.
+
+    Args:
+        config: Telegram configuration
+        chat_id: Chat containing the message
+        message_id: Message to edit
+        new_text: If provided, replaces the message text
+
+    Returns:
+        True if successful
+    """
+    if new_text:
+        url = f"{TELEGRAM_API_BASE}{config.bot_token}/editMessageText"
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'text': new_text,
+            'parse_mode': 'HTML',
+        }
+    else:
+        url = f"{TELEGRAM_API_BASE}{config.bot_token}/editMessageReplyMarkup"
+        payload = {
+            'chat_id': chat_id,
+            'message_id': message_id,
+            'reply_markup': {'inline_keyboard': []},
+        }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Failed to edit message: {e}")
+        return False
+
+
 def format_metric_line(
     metric: MetricResult,
     include_filter: bool = True,
