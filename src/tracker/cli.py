@@ -295,76 +295,80 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
         for seg_code, seg in segments_to_process:
             click.echo(f"Ingesting {seg.display_name}...")
 
-            for suburb in seg.suburbs:
-                # Query database for postcode
-                postcode_rows = db.query(
-                    "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
-                    (suburb,)
+            # ONE DDG search per segment using shortest suburb name.
+            # DDG only allows ~2 requests per IP before rate-limiting,
+            # so "revesby" captures both Revesby and Revesby Heights.
+            search_suburb = min(seg.suburbs, key=len)
+
+            # Query database for postcode
+            postcode_rows = db.query(
+                "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
+                (search_suburb,)
+            )
+            postcode = postcode_rows[0]['postcode'] if postcode_rows else ''
+
+            # Fetch from Google
+            try:
+                results = fetch_sold_listings_google(
+                    suburb=search_suburb,
+                    property_type=seg.property_type,
+                    postcode=postcode,
+                    bedrooms=seg.bedrooms,
+                    bathrooms=seg.bathrooms,
                 )
-                postcode = postcode_rows[0]['postcode'] if postcode_rows else ''
 
-                # Fetch from Google
-                try:
-                    results = fetch_sold_listings_google(
-                        suburb=suburb,
-                        property_type=seg.property_type,
-                        postcode=postcode,
-                        bedrooms=seg.bedrooms,
-                        bathrooms=seg.bathrooms,
-                    )
-
-                    if not results:
-                        continue
-
-                    # Convert to provisional_sales format
-                    sales = []
-                    for listing in results:
-                        addr_hash = hash(listing['address_normalised'])
-                        sale_id = f"google-{abs(addr_hash)}"
-
-                        status = 'price_withheld' if listing.get('price_withheld', False) else 'unconfirmed'
-
-                        sale = {
-                            'id': sale_id,
-                            'source': 'google',
-                            'unit_number': listing.get('unit_number'),
-                            'house_number': listing.get('house_number', ''),
-                            'street_name': listing.get('street_name', ''),
-                            'suburb': listing.get('suburb', suburb),
-                            'postcode': listing.get('postcode', postcode),
-                            'property_type': seg.property_type,
-                            'sold_price': listing.get('sold_price'),
-                            'sold_date': listing.get('sold_date'),
-                            'bedrooms': listing.get('bedrooms'),
-                            'bathrooms': listing.get('bathrooms'),
-                            'car_spaces': listing.get('car_spaces'),
-                            'address_normalised': listing['address_normalised'],
-                            'listing_url': listing.get('listing_url', ''),
-                            'source_site': listing.get('source_site', ''),
-                            'status': status,
-                            'raw_json': __import__('json').dumps(listing),
-                        }
-
-                        # Optionally enrich with LLM
-                        if enrich and anthropic_key and not listing.get('sold_price'):
-                            listing_url = listing.get('listing_url')
-                            if listing_url:
-                                details = extract_listing_details(listing_url, suburb, anthropic_key)
-                                if details:
-                                    sale['sold_price'] = details.get('price')
-                                    sale['bedrooms'] = sale['bedrooms'] or details.get('bedrooms')
-                                    sale['bathrooms'] = sale['bathrooms'] or details.get('bathrooms')
-
-                        sales.append(sale)
-
-                    # Upsert to database
-                    count = db.upsert_provisional_sales(sales)
-                    total_ingested += count
-                    click.echo(f"  {suburb}: {count} new sales")
-
-                except Exception as e:
-                    click.echo(f"  {suburb}: Error - {e}", err=True)
+                if not results:
                     continue
+
+                # Convert to provisional_sales format
+                sales = []
+                for listing in results:
+                    addr_hash = hash(listing['address_normalised'])
+                    sale_id = f"google-{abs(addr_hash)}"
+
+                    status = 'price_withheld' if listing.get('price_withheld', False) else 'unconfirmed'
+
+                    sale = {
+                        'id': sale_id,
+                        'source': 'google',
+                        'unit_number': listing.get('unit_number'),
+                        'house_number': listing.get('house_number', ''),
+                        'street_name': listing.get('street_name', ''),
+                        'suburb': listing.get('suburb', search_suburb),
+                        'postcode': listing.get('postcode', postcode),
+                        'property_type': seg.property_type,
+                        'sold_price': listing.get('sold_price'),
+                        'sold_date': listing.get('sold_date'),
+                        'bedrooms': listing.get('bedrooms'),
+                        'bathrooms': listing.get('bathrooms'),
+                        'car_spaces': listing.get('car_spaces'),
+                        'address_normalised': listing['address_normalised'],
+                        'listing_url': listing.get('listing_url', ''),
+                        'source_site': listing.get('source_site', ''),
+                        'status': status,
+                        'raw_json': __import__('json').dumps(listing),
+                    }
+
+                    # Optionally enrich with LLM
+                    if enrich and anthropic_key and not listing.get('sold_price'):
+                        listing_url = listing.get('listing_url')
+                        if listing_url:
+                            details = extract_listing_details(listing_url, search_suburb, anthropic_key)
+                            if details:
+                                sale['sold_price'] = details.get('price')
+                                sale['bedrooms'] = sale['bedrooms'] or details.get('bedrooms')
+                                sale['bathrooms'] = sale['bathrooms'] or details.get('bathrooms')
+
+                    sales.append(sale)
+
+                # Upsert to database
+                count = db.upsert_provisional_sales(sales)
+                total_ingested += count
+                click.echo(f"  {search_suburb}: {count} new sales")
+
+            except Exception as e:
+                click.echo(f"  {search_suburb}: Error - {e}", err=True)
+                continue
 
     click.echo(f"\nTotal ingested: {total_ingested} sales")
 
