@@ -61,8 +61,10 @@ Domain API is paid — we do NOT depend on it. Instead, property URLs come from 
 
 **Link sources (in priority order):**
 
-1. **Domain listing URL** — extracted from Google search results during ingest (the search returns `domain.com.au/...` URLs directly)
-2. **Google search fallback** — if no Domain URL was captured: `https://www.google.com/search?q={address}+{suburb}+sold`
+1. **Domain listing URL** — preferred, extracted from Google search results during ingest
+2. **realestate.com.au URL** — if no Domain URL found
+3. **Other listing site URL** — allhomes, etc.
+4. **Google search fallback** — if no listing URL was captured: `https://www.google.com/search?q={address}+{suburb}+sold`
 
 **Storage:** New column `listing_url TEXT` in `sale_classifications` table.
 
@@ -72,17 +74,25 @@ The Domain API (`/v1/salesResults` and `/v1/properties/_suggest`) is paid. We re
 
 #### Tier 1: Google Search Scrape (Primary)
 
-A Python module that searches Google for recent sold listings per segment.
+A Python module that searches Google for recent sold listings per segment. Results come from multiple real estate sites (domain.com.au, realestate.com.au, allhomes.com.au, etc.) and are deduplicated.
 
 **Search queries per segment:**
-- Revesby: `site:domain.com.au sold Revesby house 500sqm OR 550sqm OR 600sqm`
-- Wollstonecraft: `site:domain.com.au sold Wollstonecraft 2 bed 1 bath apartment`
+- Revesby: `sold Revesby house 2026` (+ optional area/street refinements)
+- Wollstonecraft: `sold Wollstonecraft 2 bed 1 bath apartment 2026`
 
 **What we extract from Google search results:**
-- Domain listing URL (from the result link)
+- Listing URL (domain.com.au, realestate.com.au, etc.)
 - Address (from the result title/snippet)
 - Price (from the snippet, if shown — e.g. "Sold for $1,420,000")
 - Beds/baths/car (from the snippet)
+- Source site (domain, realestate, etc.)
+
+**Deduplication:**
+- Normalise address from each result using existing `normalise_address()`
+- Group results by normalised address
+- Prefer domain.com.au URL (best listing pages), fall back to realestate.com.au, then others
+- Merge data across sources (e.g. price from one, beds/baths from another)
+- Deduplicate against existing `provisional_sales` table to avoid re-ingesting known sales
 
 **Anti-blocking measures:**
 - Random delays between requests (2-5 seconds)
