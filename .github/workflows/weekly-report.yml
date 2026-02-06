@@ -187,11 +187,11 @@ jobs:
           fi
           python -m tracker ingest $FORCE_FLAG
 
-      - name: Step 1b - Ingest Domain sold listings
+      - name: Step 1b - Ingest sold listings from Google search
         env:
-          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          python -m tracker ingest-domain
+          python -m tracker ingest-google
 
       - name: Step 1c - Match provisional sales to VG
         run: |
@@ -200,14 +200,14 @@ jobs:
       - name: Step 2a - Enrich new Revesby sales
         if: github.event.inputs.run_enrich != 'false'
         env:
-          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           python -m tracker enrich --segment revesby_houses --limit 20
 
       - name: Step 2b - Enrich new Wollstonecraft sales
         if: github.event.inputs.run_enrich != 'false'
         env:
-          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           python -m tracker enrich --segment wollstonecraft_units --limit 20
 

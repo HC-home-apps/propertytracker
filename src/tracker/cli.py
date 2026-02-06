@@ -1224,7 +1224,7 @@ def review_poll(ctx):
         callback_id = callback.get('id')
         data = callback.get('data', '')
 
-        # Parse callback data: "review:SEGMENT:SALE_ID:yes/no"
+        # Parse callback data: "review:SEGMENT:SALE_ID:yes/no" or "review:SEGMENT:all:yes/no"
         parts = data.split(':')
         if len(parts) != 4 or parts[0] != 'review':
             continue
@@ -1244,18 +1244,52 @@ def review_poll(ctx):
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
 
-        result = db.execute("""
-            UPDATE sale_classifications
-            SET review_status = ?,
-                use_in_median = ?,
-                reviewed_at = ?,
-                updated_at = ?
-            WHERE sale_id = ?
-        """, (status, use_in_median, now, now, sale_id))
+        # Handle bulk "all" button
+        if sale_id == 'all':
+            # Extract sale IDs from the message's inline keyboard
+            msg = callback.get('message', {})
+            reply_markup = msg.get('reply_markup', {})
+            inline_keyboard = reply_markup.get('inline_keyboard', [])
 
-        if result > 0:
-            processed += 1
-            click.echo(f"  {sale_id}: {status}")
+            sale_ids = []
+            for row in inline_keyboard:
+                for button in row:
+                    button_data = button.get('callback_data', '')
+                    button_parts = button_data.split(':')
+                    # Extract individual sale IDs (skip 'all' buttons)
+                    if len(button_parts) == 4 and button_parts[0] == 'review' and button_parts[2] != 'all':
+                        sale_ids.append(button_parts[2])
+
+            # Update all sales
+            for sid in sale_ids:
+                result = db.execute("""
+                    UPDATE sale_classifications
+                    SET review_status = ?,
+                        use_in_median = ?,
+                        reviewed_at = ?,
+                        updated_at = ?
+                    WHERE sale_id = ?
+                """, (status, use_in_median, now, now, sid))
+
+                if result > 0:
+                    processed += 1
+                    click.echo(f"  {sid}: {status}")
+
+            response_text = f"Marked all {len(sale_ids)} sales as {status}"
+        else:
+            # Single sale update
+            result = db.execute("""
+                UPDATE sale_classifications
+                SET review_status = ?,
+                    use_in_median = ?,
+                    reviewed_at = ?,
+                    updated_at = ?
+                WHERE sale_id = ?
+            """, (status, use_in_median, now, now, sale_id))
+
+            if result > 0:
+                processed += 1
+                click.echo(f"  {sale_id}: {status}")
 
         # Acknowledge callback
         answer_callback_query(telegram_config, callback_id, response_text)
@@ -1267,10 +1301,15 @@ def review_poll(ctx):
         original_text = msg.get('text', '')
         if chat_id and message_id:
             verdict = "YES - Comparable" if response == 'yes' else "NO - Not comparable"
-            new_text = original_text.replace(
-                "Is this comparable to your property?",
-                f"<b>{verdict}</b>",
-            )
+            if sale_id == 'all':
+                # Bulk verdict for digest
+                new_text = original_text + f"\n\n<b>All marked: {verdict}</b>"
+            else:
+                # Single sale verdict
+                new_text = original_text.replace(
+                    "Is this comparable to your property?",
+                    f"<b>{verdict}</b>",
+                )
             edit_message_remove_buttons(
                 telegram_config, chat_id, message_id, new_text=new_text,
             )

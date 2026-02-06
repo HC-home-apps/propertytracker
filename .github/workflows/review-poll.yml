@@ -48,18 +48,21 @@ jobs:
         if: github.event_name == 'repository_dispatch'
         env:
           SALE_ID: ${{ github.event.client_payload.sale_id }}
+          SALE_IDS: ${{ github.event.client_payload.sale_ids }}
           RESPONSE: ${{ github.event.client_payload.response }}
           SEGMENT_CODE: ${{ github.event.client_payload.segment_code }}
         run: |
           python -c "
           import os
+          import json
           from datetime import datetime, timezone
           from tracker.db import Database
 
           db = Database('data/tracker.db')
           db.init_schema()
 
-          sale_id = os.environ['SALE_ID']
+          sale_id = os.environ.get('SALE_ID', '')
+          sale_ids_json = os.environ.get('SALE_IDS', '')
           response = os.environ['RESPONSE']
           segment = os.environ.get('SEGMENT_CODE', '')
 
@@ -67,13 +70,25 @@ jobs:
           use_in_median = 1 if response == 'yes' else 0
           now = datetime.now(timezone.utc).isoformat()
 
-          result = db.execute('''
-              UPDATE sale_classifications
-              SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
-              WHERE sale_id = ?
-          ''', (status, use_in_median, now, now, sale_id))
+          # Handle bulk update if sale_ids is provided (from 'all' button)
+          if sale_ids_json:
+              sale_ids = json.loads(sale_ids_json)
+              for sid in sale_ids:
+                  result = db.execute('''
+                      UPDATE sale_classifications
+                      SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
+                      WHERE sale_id = ?
+                  ''', (status, use_in_median, now, now, sid))
+                  print(f'{sid} ({segment}): {status} (rows updated: {result})')
+          else:
+              # Single sale update
+              result = db.execute('''
+                  UPDATE sale_classifications
+                  SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
+                  WHERE sale_id = ?
+              ''', (status, use_in_median, now, now, sale_id))
+              print(f'{sale_id} ({segment}): {status} (rows updated: {result})')
 
-          print(f'{sale_id} ({segment}): {status} (rows updated: {result})')
           db.close()
           "
 
