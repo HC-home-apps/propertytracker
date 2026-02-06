@@ -16,6 +16,7 @@ from tracker.ingest.downloader import download_psi_archive, extract_archive, get
 from tracker.ingest.parser import parse_all_csv_files
 from tracker.ingest.domain_sold import fetch_sold_listings
 from tracker.ingest.matcher import match_provisional_to_vg
+from tracker.ingest.google_search import fetch_sold_listings_google
 from tracker.compute.segments import (
     init_segments,
     get_segment_for_sale,
@@ -256,6 +257,111 @@ def ingest_domain(ctx):
         logger.exception("Domain ingest failed")
         db.complete_run(run_id, status='failed', error_message=str(e))
         raise click.ClickException(f"Domain ingest failed: {e}")
+
+
+@cli.command('ingest-google')
+@click.option('--segment', help='Specific segment to ingest (optional)')
+@click.option('--enrich', is_flag=True, help='Run LLM agent for incomplete data')
+@click.pass_context
+def ingest_google(ctx, segment: Optional[str], enrich: bool):
+    """Ingest sold listings from Google search."""
+    from tracker.ingest.llm_agent import extract_listing_details
+    import os
+
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config)
+
+    # Filter segments: only those requiring manual review
+    segments_to_process = []
+    for seg_code, seg in SEGMENTS.items():
+        if segment and seg_code != segment:
+            continue
+        if seg.require_manual_review:
+            segments_to_process.append((seg_code, seg))
+
+    if not segments_to_process:
+        click.echo("No segments configured for Google search ingest")
+        return
+
+    anthropic_key = os.getenv('ANTHROPIC_API_KEY') if enrich else None
+    total_ingested = 0
+
+    with Database(config.get('database', {}).get('path', ctx.obj['db_path'])) as db:
+        for seg_code, seg in segments_to_process:
+            click.echo(f"Ingesting {seg.display_name}...")
+
+            for suburb in seg.suburbs:
+                # Query database for postcode
+                postcode_rows = db.query(
+                    "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
+                    (suburb,)
+                )
+                postcode = postcode_rows[0]['postcode'] if postcode_rows else ''
+
+                # Fetch from Google
+                try:
+                    results = fetch_sold_listings_google(
+                        suburb=suburb,
+                        property_type=seg.property_type,
+                        postcode=postcode,
+                        bedrooms=seg.bedrooms,
+                        bathrooms=seg.bathrooms,
+                    )
+
+                    if not results:
+                        continue
+
+                    # Convert to provisional_sales format
+                    sales = []
+                    for listing in results:
+                        addr_hash = hash(listing['address_normalised'])
+                        sale_id = f"google-{abs(addr_hash)}"
+
+                        status = 'price_withheld' if listing.get('price_withheld', False) else 'unconfirmed'
+
+                        sale = {
+                            'id': sale_id,
+                            'source': 'google',
+                            'unit_number': listing.get('unit_number'),
+                            'house_number': listing.get('house_number', ''),
+                            'street_name': listing.get('street_name', ''),
+                            'suburb': listing.get('suburb', suburb),
+                            'postcode': listing.get('postcode', postcode),
+                            'property_type': seg.property_type,
+                            'sold_price': listing.get('sold_price'),
+                            'sold_date': listing.get('sold_date'),
+                            'bedrooms': listing.get('bedrooms'),
+                            'bathrooms': listing.get('bathrooms'),
+                            'car_spaces': listing.get('car_spaces'),
+                            'address_normalised': listing['address_normalised'],
+                            'listing_url': listing.get('listing_url', ''),
+                            'source_site': listing.get('source_site', ''),
+                            'status': status,
+                            'raw_json': __import__('json').dumps(listing),
+                        }
+
+                        # Optionally enrich with LLM
+                        if enrich and anthropic_key and not listing.get('sold_price'):
+                            listing_url = listing.get('listing_url')
+                            if listing_url:
+                                details = extract_listing_details(listing_url, suburb, anthropic_key)
+                                if details:
+                                    sale['sold_price'] = details.get('price')
+                                    sale['bedrooms'] = sale['bedrooms'] or details.get('bedrooms')
+                                    sale['bathrooms'] = sale['bathrooms'] or details.get('bathrooms')
+
+                        sales.append(sale)
+
+                    # Upsert to database
+                    count = db.upsert_provisional_sales(sales)
+                    total_ingested += count
+                    click.echo(f"  {suburb}: {count} new sales")
+
+                except Exception as e:
+                    click.echo(f"  {suburb}: Error - {e}", err=True)
+                    continue
+
+    click.echo(f"\nTotal ingested: {total_ingested} sales")
 
 
 @cli.command('match-provisional')
