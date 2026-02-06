@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 from tracker.db import Database
 from tracker.ingest.downloader import download_psi_archive, extract_archive, get_data_path
 from tracker.ingest.parser import parse_all_csv_files
+from tracker.ingest.domain_sold import fetch_sold_listings
+from tracker.ingest.matcher import match_provisional_to_vg
 from tracker.compute.segments import (
     init_segments,
     get_segment_for_sale,
@@ -200,6 +202,73 @@ def ingest(ctx, force):
         db.close()
 
 
+@cli.command('ingest-domain')
+@click.pass_context
+def ingest_domain(ctx):
+    """Fetch sold listings from Domain API for all segments."""
+    import os
+    db = Database(ctx.obj['db_path'])
+    db.init_schema()
+
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config)
+
+    api_key = os.getenv('DOMAIN_API_KEY')
+    if not api_key:
+        click.echo("DOMAIN_API_KEY not set, skipping Domain ingest")
+        return
+
+    run_id = db.start_run('ingest-domain', 'cli')
+    total_inserted = 0
+
+    try:
+        segments_config = config.get('segments', {})
+        for seg_code, seg_def in segments_config.items():
+            suburbs = seg_def.get('suburbs', [])
+            prop_type = seg_def.get('property_type', 'house')
+            for suburb in suburbs:
+                postcode_rows = db.query(
+                    "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
+                    (suburb,)
+                )
+                postcode = postcode_rows[0]['postcode'] if postcode_rows else ''
+
+                click.echo(f"Fetching Domain sold listings for {suburb} ({prop_type})...")
+                listings = fetch_sold_listings(
+                    suburb=suburb.title(),
+                    property_type=prop_type,
+                    postcode=postcode,
+                    api_key=api_key,
+                )
+
+                if listings:
+                    inserted = db.upsert_provisional_sales(listings)
+                    total_inserted += inserted
+                    click.echo(f"  {len(listings)} found, {inserted} new")
+                else:
+                    click.echo(f"  No sold listings found")
+
+        click.echo(f"Total: {total_inserted} new provisional sales")
+        db.complete_run(run_id, status='success', records_inserted=total_inserted)
+
+    except Exception as e:
+        logger.exception("Domain ingest failed")
+        db.complete_run(run_id, status='failed', error_message=str(e))
+        raise click.ClickException(f"Domain ingest failed: {e}")
+
+
+@cli.command('match-provisional')
+@click.pass_context
+def match_provisional(ctx):
+    """Match provisional Domain sales to VG records."""
+    db = Database(ctx.obj['db_path'])
+    db.init_schema()
+
+    click.echo("Matching provisional sales to VG records...")
+    matched = match_provisional_to_vg(db)
+    click.echo(f"Matched {matched} provisional sales")
+
+
 @cli.command()
 @click.option('--date', '-d', 'ref_date', default=None, help='Reference date (YYYY-MM-DD)')
 @click.pass_context
@@ -348,9 +417,12 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
             selling_cost_rate=selling_cost_rate,
         )
 
+    # Fetch unconfirmed provisional sales for report
+    provisional_sales = db.get_unconfirmed_provisional_sales()
+
     # Format report
     period_str = reference_date.strftime('%b %-d, %Y')
-    message = format_simple_report(new_sales, positions, period_str, config)
+    message = format_simple_report(new_sales, positions, period_str, config, provisional_sales)
 
     if dry_run:
         click.echo("\n--- DRY RUN ---")
@@ -358,7 +430,7 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
         click.echo("--- END ---\n")
     else:
         telegram_config = TelegramConfig.from_env()
-        success = send_simple_report(telegram_config, new_sales, positions, period_str, config)
+        success = send_simple_report(telegram_config, new_sales, positions, period_str, config, provisional_sales)
 
         if success:
             click.echo("Report sent successfully!")
@@ -887,6 +959,163 @@ def report(ctx, ref_date, detailed):
 
     finally:
         db.close()
+
+
+@cli.command('review-buttons')
+@click.option('--segment', default='wollstonecraft_units', help='Segment to send for review')
+@click.option('--limit', default=10, help='Max sales to send')
+@click.option('--dry-run', is_flag=True, help='Print without sending')
+@click.pass_context
+def review_buttons(ctx, segment, limit, dry_run):
+    """Send pending sales to Telegram with inline Yes/No buttons."""
+    from tracker.notify.telegram import TelegramConfig, send_review_with_buttons
+
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config)
+
+    db = Database(db_path=ctx.obj['db_path'])
+
+    seg = SEGMENTS.get(segment)
+    if not seg:
+        raise click.ClickException(f"Unknown segment: {segment}")
+
+    # Get pending sales
+    suburbs = list(seg.suburbs)
+    placeholders = ','.join(['?' for _ in suburbs])
+
+    query = f"""
+        SELECT
+            sc.sale_id,
+            r.house_number || ' ' || r.street_name as address,
+            r.suburb,
+            r.purchase_price as price,
+            r.area_sqm,
+            sc.zoning,
+            sc.year_built
+        FROM sale_classifications sc
+        JOIN raw_sales r ON sc.sale_id = r.dealing_number
+        WHERE sc.review_status = 'pending'
+          AND sc.is_auto_excluded = 0
+          AND LOWER(r.suburb) IN ({placeholders})
+          AND r.property_type = ?
+        ORDER BY r.contract_date DESC
+        LIMIT ?
+    """
+    params = list(suburbs) + [seg.property_type, limit]
+
+    rows = db.query(query, tuple(params))
+
+    if not rows:
+        click.echo("No sales pending review")
+        db.close()
+        return
+
+    click.echo(f"Sending {len(rows)} sales for review with buttons...")
+
+    if dry_run:
+        for row in rows:
+            click.echo(f"  Would send: {row['address']} - ${row['price']:,}")
+        db.close()
+        return
+
+    telegram_config = TelegramConfig.from_env()
+    sent = 0
+
+    for row in rows:
+        success = send_review_with_buttons(
+            telegram_config,
+            sale_id=row['sale_id'],
+            address=f"{row['address']}, {row['suburb']}",
+            price=row['price'],
+            area_sqm=row['area_sqm'],
+            zoning=row['zoning'],
+            year_built=row['year_built'],
+            segment_code=segment,
+        )
+        if success:
+            sent += 1
+            click.echo(f"  Sent: {row['address']}")
+
+    click.echo(f"\nSent {sent}/{len(rows)} review requests")
+    db.close()
+
+
+@cli.command('review-poll')
+@click.pass_context
+def review_poll(ctx):
+    """Poll for and process button responses from Telegram."""
+    from tracker.notify.telegram import (
+        TelegramConfig,
+        get_callback_updates,
+        answer_callback_query,
+    )
+
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config)
+
+    db = Database(db_path=ctx.obj['db_path'])
+    telegram_config = TelegramConfig.from_env()
+
+    click.echo("Polling for review responses...")
+
+    updates = get_callback_updates(telegram_config)
+    processed = 0
+    max_update_id = None
+
+    for update in updates:
+        update_id = update.get('update_id')
+        if max_update_id is None or update_id > max_update_id:
+            max_update_id = update_id
+
+        callback = update.get('callback_query')
+        if not callback:
+            continue
+
+        callback_id = callback.get('id')
+        data = callback.get('data', '')
+
+        # Parse callback data: "review:SEGMENT:SALE_ID:yes/no"
+        parts = data.split(':')
+        if len(parts) != 4 or parts[0] != 'review':
+            continue
+
+        _, segment_code, sale_id, response = parts
+
+        if response == 'yes':
+            status = 'comparable'
+            use_in_median = 1
+            response_text = "Marked as comparable"
+        else:
+            status = 'not_comparable'
+            use_in_median = 0
+            response_text = "Marked as not comparable"
+
+        # Update database
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+
+        result = db.execute("""
+            UPDATE sale_classifications
+            SET review_status = ?,
+                use_in_median = ?,
+                reviewed_at = ?,
+                updated_at = ?
+            WHERE sale_id = ?
+        """, (status, use_in_median, now, now, sale_id))
+
+        if result > 0:
+            processed += 1
+            click.echo(f"  {sale_id}: {status}")
+
+        # Acknowledge callback
+        answer_callback_query(telegram_config, callback_id, response_text)
+
+    # Clear processed updates by requesting with offset
+    if max_update_id is not None:
+        get_callback_updates(telegram_config, offset=max_update_id + 1)
+
+    click.echo(f"\nProcessed {processed} responses")
+    db.close()
 
 
 if __name__ == '__main__':
