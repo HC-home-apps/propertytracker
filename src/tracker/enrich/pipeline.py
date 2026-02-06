@@ -123,7 +123,7 @@ def process_pending_sales(
 
     query = f"""
         SELECT r.id, r.dealing_number, r.house_number, r.street_name,
-               r.suburb, r.postcode, r.area_sqm, r.address_normalised,
+               r.suburb, r.postcode, r.area_sqm,
                ps.listing_url
         FROM raw_sales r
         LEFT JOIN sale_classifications sc ON r.dealing_number = sc.sale_id
