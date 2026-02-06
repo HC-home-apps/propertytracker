@@ -254,6 +254,8 @@ def compute_affordability_gap(
 
 def format_currency(amount: int) -> str:
     """Format amount as Australian currency."""
+    if amount is None:
+        return "N/A"
     if amount >= 0:
         return f"${amount:,}"
     else:

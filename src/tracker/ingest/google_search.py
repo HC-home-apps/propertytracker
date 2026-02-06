@@ -90,6 +90,10 @@ def parse_search_results_html(html: str) -> List[dict]:
         if not source_site:
             continue
 
+        # Skip aggregate/category pages (e.g. /sold-listings/, /sale/)
+        if _is_aggregate_url(url):
+            continue
+
         title = link.get_text(strip=True)
 
         # Snippet: a.result__snippet
@@ -115,6 +119,12 @@ def _match_real_estate_domain(url: str) -> Optional[str]:
         if domain in url:
             return domain
     return None
+
+
+def _is_aggregate_url(url: str) -> bool:
+    """Check if a URL is an aggregate/category page rather than a single listing."""
+    aggregate_patterns = ['/sold-listings/', '/sale/', '/for-sale/', '/buy/']
+    return any(pattern in url for pattern in aggregate_patterns)
 
 
 def extract_listing_data(result: dict, suburb: str, postcode: str) -> dict:
@@ -181,13 +191,18 @@ def _parse_address_from_title(title: str, suburb: str) -> tuple:
     """Parse address components from a search result title.
 
     Handles formats like:
-    - "5/10 Shirley Rd, Wollstonecraft NSW 2065 - Sold ..."  (unit)
-    - "15 Alliance Ave, Revesby NSW 2212 - Sold ..."          (house)
+    - "Sold 5/10 Shirley Rd, Wollstonecraft NSW 2065 on 06 Dec 2025 ..."
+    - "5/10 Shirley Rd, Wollstonecraft NSW 2065 - Sold ..."
+    - "15 Alliance Ave, Revesby NSW 2212 - Sold ..."
 
     Returns:
         (unit_number, house_number, street_name) tuple
     """
     cleaned = title
+
+    # Strip "Sold " prefix (DDG/Domain title format)
+    cleaned = re.sub(r'^[Ss]old\s+', '', cleaned)
+
     if suburb:
         pattern = re.compile(
             r'[,\s]*\b' + re.escape(suburb) + r'\b.*$',
@@ -196,7 +211,8 @@ def _parse_address_from_title(title: str, suburb: str) -> tuple:
         cleaned = pattern.sub('', cleaned).strip()
 
     # Strip common suffixes like " - Domain.com.au", " | realestate.com.au"
-    cleaned = re.sub(r'\s*[-|].*$', '', cleaned).strip()
+    # Require spaces around separator to avoid matching hyphens in addresses (e.g. 13-17)
+    cleaned = re.sub(r'\s+[-|]\s+.*$', '', cleaned).strip()
 
     # Strip trailing state/postcode if still present (e.g., "NSW 2065")
     cleaned = re.sub(r'\s+(NSW|VIC|QLD|SA|WA|TAS|NT|ACT)\s*\d{0,4}\s*$', '', cleaned, flags=re.IGNORECASE).strip()
@@ -318,6 +334,11 @@ def _parse_sold_date(text: str) -> Optional[str]:
         year = match.group(3)
         return f'{year}-{month}-{day}'
 
+    # ISO format: "2025-07-21T14:11:31.137" (Domain API snippet format)
+    match = re.search(r'(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}', text)
+    if match:
+        return f'{match.group(1)}-{match.group(2)}-{match.group(3)}'
+
     return None
 
 
@@ -393,8 +414,8 @@ def fetch_sold_listings_google(
         query = build_search_query(suburb, property_type, bedrooms, bathrooms)
         logger.info(f"DuckDuckGo search query: {query}")
 
-        # Rate limiting: random delay between 2-5 seconds
-        delay = random.uniform(2.0, 5.0)
+        # Rate limiting: random delay between 8-15 seconds to avoid DDG 202 CAPTCHA
+        delay = random.uniform(8.0, 15.0)
         time.sleep(delay)
 
         headers = {
