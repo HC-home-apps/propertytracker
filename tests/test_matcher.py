@@ -159,3 +159,119 @@ class TestMatchProvisionalToVG:
         """Should return 0 when no provisional sales exist."""
         matched = match_provisional_to_vg(db)
         assert matched == 0
+
+    def test_carries_over_review_decision_on_match(self, db):
+        """When a reviewed provisional sale matches VG, carry over review to sale_classifications."""
+        db.upsert_raw_sales([{
+            'dealing_number': 'AU555555',
+            'property_id': '123456.0',
+            'unit_number': '',
+            'house_number': '15',
+            'street_name': 'Smith St',
+            'suburb': 'Revesby',
+            'postcode': '2212',
+            'area_sqm': 550,
+            'zone_code': None,
+            'nature_of_property': 'Residence',
+            'strata_lot_number': None,
+            'contract_date': '2026-01-15',
+            'settlement_date': '2026-02-15',
+            'purchase_price': 920000,
+            'property_type': 'house',
+            'district_code': 108,
+            'source_file': 'test.csv',
+        }])
+
+        db.upsert_provisional_sales([{
+            'id': 'google-12345',
+            'source': 'google',
+            'unit_number': '',
+            'house_number': '15',
+            'street_name': 'Smith Street',
+            'suburb': 'Revesby',
+            'postcode': '2212',
+            'property_type': 'house',
+            'sold_price': 920000,
+            'sold_date': '2026-01-15',
+            'bedrooms': 3,
+            'bathrooms': 2,
+            'car_spaces': 1,
+            'address_normalised': '|15|smith st|revesby|2212',
+            'listing_url': 'https://domain.com.au/15-smith-st',
+            'source_site': 'domain.com.au',
+            'status': 'unconfirmed',
+            'raw_json': '{}',
+        }])
+
+        # Mark the provisional sale as reviewed (comparable)
+        db.execute(
+            "UPDATE provisional_sales SET review_status = ?, use_in_median = ?, reviewed_at = ? WHERE id = ?",
+            ('comparable', 1, '2026-01-20T00:00:00+00:00', 'google-12345')
+        )
+
+        matched = match_provisional_to_vg(db)
+        assert matched == 1
+
+        # Check that sale_classifications entry was created with carried-over review
+        rows = db.query(
+            "SELECT review_status, use_in_median, listing_url FROM sale_classifications WHERE sale_id = ?",
+            ('AU555555',)
+        )
+        assert len(rows) == 1
+        assert rows[0]['review_status'] == 'comparable'
+        assert rows[0]['use_in_median'] == 1
+        assert rows[0]['listing_url'] == 'https://domain.com.au/15-smith-st'
+
+    def test_no_carryover_for_unreviewed_provisional(self, db):
+        """When an unreviewed provisional matches VG, should NOT create sale_classifications."""
+        db.upsert_raw_sales([{
+            'dealing_number': 'AU444444',
+            'property_id': '789.0',
+            'unit_number': '',
+            'house_number': '20',
+            'street_name': 'Jones Ave',
+            'suburb': 'Revesby',
+            'postcode': '2212',
+            'area_sqm': 500,
+            'zone_code': None,
+            'nature_of_property': 'Residence',
+            'strata_lot_number': None,
+            'contract_date': '2026-01-20',
+            'settlement_date': '2026-02-20',
+            'purchase_price': 880000,
+            'property_type': 'house',
+            'district_code': 108,
+            'source_file': 'test.csv',
+        }])
+
+        db.upsert_provisional_sales([{
+            'id': 'google-67890',
+            'source': 'google',
+            'unit_number': '',
+            'house_number': '20',
+            'street_name': 'Jones Avenue',
+            'suburb': 'Revesby',
+            'postcode': '2212',
+            'property_type': 'house',
+            'sold_price': 880000,
+            'sold_date': '2026-01-20',
+            'bedrooms': None,
+            'bathrooms': None,
+            'car_spaces': None,
+            'address_normalised': '|20|jones ave|revesby|2212',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
+            'raw_json': '{}',
+        }])
+
+        # Provisional is still 'pending' (default), so no carryover should happen
+        matched = match_provisional_to_vg(db)
+        assert matched == 1
+
+        # sale_classifications should NOT have been created
+        rows = db.query(
+            "SELECT * FROM sale_classifications WHERE sale_id = ?",
+            ('AU444444',)
+        )
+        assert len(rows) == 0

@@ -127,7 +127,7 @@ def process_pending_sales(
                ps.listing_url
         FROM raw_sales r
         LEFT JOIN sale_classifications sc ON r.dealing_number = sc.sale_id
-        LEFT JOIN provisional_sales ps ON ps.vg_dealing_number = r.dealing_number AND ps.status = 'confirmed'
+        LEFT JOIN provisional_sales ps ON ps.matched_dealing_number = r.dealing_number AND ps.status = 'confirmed'
         WHERE sc.sale_id IS NULL
           AND LOWER(r.suburb) IN ({placeholders})
           AND r.property_type = ?

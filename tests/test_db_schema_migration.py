@@ -1,4 +1,4 @@
-"""Tests for DB schema additions: listing_url, source_site, price_withheld."""
+"""Tests for DB schema additions: listing_url, source_site, price_withheld, review columns."""
 
 import sqlite3
 import uuid
@@ -88,6 +88,44 @@ class TestProvisionalSalesSchema:
         )
         assert rows[0]["listing_url"] == "https://www.realestate.com.au/sold/property-unit-nsw-lane+cove-123"
         assert rows[0]["source_site"] == "realestate.com.au"
+
+    def test_review_status_column_exists(self, db):
+        columns = _get_columns(db, "provisional_sales")
+        assert "review_status" in columns
+
+    def test_review_status_defaults_to_pending(self, db):
+        sale_id = str(uuid.uuid4())[:8]
+        db.execute(
+            """INSERT INTO provisional_sales (id, source, suburb)
+               VALUES (?, ?, ?)""",
+            (sale_id, "google", "REVESBY"),
+        )
+        rows = db.query(
+            "SELECT review_status FROM provisional_sales WHERE id = ?",
+            (sale_id,),
+        )
+        assert rows[0]["review_status"] == "pending"
+
+    def test_review_status_accepts_comparable(self, db):
+        sale_id = str(uuid.uuid4())[:8]
+        db.execute(
+            """INSERT INTO provisional_sales (id, source, suburb, review_status)
+               VALUES (?, ?, ?, ?)""",
+            (sale_id, "google", "REVESBY", "comparable"),
+        )
+        rows = db.query(
+            "SELECT review_status FROM provisional_sales WHERE id = ?",
+            (sale_id,),
+        )
+        assert rows[0]["review_status"] == "comparable"
+
+    def test_review_sent_at_column_exists(self, db):
+        columns = _get_columns(db, "provisional_sales")
+        assert "review_sent_at" in columns
+
+    def test_use_in_median_column_exists(self, db):
+        columns = _get_columns(db, "provisional_sales")
+        assert "use_in_median" in columns
 
     def test_invalid_status_rejected(self, db):
         sale_id = str(uuid.uuid4())[:8]
@@ -185,6 +223,42 @@ class TestMigrationOnExistingDb:
         assert "source_site" in columns
         db.close()
 
+    def test_migration_adds_review_columns_to_provisional_sales(self, temp_db):
+        """Simulate an old DB without review columns and verify migration adds them."""
+        from tracker.db import Database
+
+        conn = sqlite3.connect(temp_db)
+        conn.execute("""
+            CREATE TABLE sale_classifications (
+                sale_id TEXT PRIMARY KEY,
+                address TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE provisional_sales (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                suburb TEXT NOT NULL,
+                status TEXT DEFAULT 'unconfirmed',
+                listing_url TEXT,
+                source_site TEXT,
+                raw_json TEXT,
+                ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        db = Database(temp_db)
+        db._migrate_schema()
+
+        columns = _get_columns(db, "provisional_sales")
+        assert "review_status" in columns
+        assert "reviewed_at" in columns
+        assert "review_sent_at" in columns
+        assert "use_in_median" in columns
+        db.close()
+
     def test_migration_is_idempotent(self, db):
         """Running _migrate_schema twice should not fail."""
         db._migrate_schema()
@@ -195,3 +269,5 @@ class TestMigrationOnExistingDb:
         assert "listing_url" in columns_sc
         assert "listing_url" in columns_ps
         assert "source_site" in columns_ps
+        assert "review_status" in columns_ps
+        assert "review_sent_at" in columns_ps

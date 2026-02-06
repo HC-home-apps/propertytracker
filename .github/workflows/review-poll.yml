@@ -69,15 +69,25 @@ jobs:
           use_in_median = 1 if response == 'yes' else 0
           now = datetime.now(timezone.utc).isoformat()
 
+          def is_provisional(sid):
+              return sid.startswith('google-') or sid.startswith('domain-')
+
           total_updated = 0
           for sale_id in sale_ids:
-              result = db.execute('''
-                  UPDATE sale_classifications
-                  SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
-                  WHERE sale_id = ?
-              ''', (status, use_in_median, now, now, sale_id))
+              if is_provisional(sale_id):
+                  result = db.execute('''
+                      UPDATE provisional_sales
+                      SET review_status = ?, use_in_median = ?, reviewed_at = ?
+                      WHERE id = ?
+                  ''', (status, use_in_median, now, sale_id))
+              else:
+                  result = db.execute('''
+                      UPDATE sale_classifications
+                      SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
+                      WHERE sale_id = ?
+                  ''', (status, use_in_median, now, now, sale_id))
               total_updated += result
-              print(f'{sale_id} ({segment}): {status}')
+              print(f'{sale_id} ({segment}): {status} [{"provisional" if is_provisional(sale_id) else "vg"}]')
 
           print(f'Total rows updated: {total_updated}')
           db.close()

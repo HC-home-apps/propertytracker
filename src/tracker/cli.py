@@ -1106,11 +1106,12 @@ def review_buttons(ctx, segment, limit, dry_run):
     if not seg:
         raise click.ClickException(f"Unknown segment: {segment}")
 
-    # Get pending sales
+    # Get pending sales from both VG and provisional sources
     suburbs = list(seg.suburbs)
     placeholders = ','.join(['?' for _ in suburbs])
 
-    query = f"""
+    # Query 1: VG sales (enriched, from sale_classifications)
+    vg_query = f"""
         SELECT
             sc.sale_id,
             r.house_number || ' ' || r.street_name as address,
@@ -1119,7 +1120,13 @@ def review_buttons(ctx, segment, limit, dry_run):
             r.area_sqm,
             sc.zoning,
             sc.year_built,
-            sc.listing_url
+            sc.listing_url,
+            NULL as bedrooms,
+            NULL as bathrooms,
+            NULL as car_spaces,
+            NULL as source_site,
+            NULL as sold_date,
+            'vg' as source_type
         FROM sale_classifications sc
         JOIN raw_sales r ON sc.sale_id = r.dealing_number
         WHERE sc.review_status = 'pending'
@@ -1127,24 +1134,74 @@ def review_buttons(ctx, segment, limit, dry_run):
           AND sc.review_sent_at IS NULL
           AND LOWER(r.suburb) IN ({placeholders})
           AND r.property_type = ?
-          AND date(r.contract_date) >= date('now', '-7 days')
         ORDER BY r.contract_date DESC
         LIMIT ?
     """
-    params = list(suburbs) + [seg.property_type, limit]
+    vg_params = list(suburbs) + [seg.property_type, limit]
+    vg_rows = db.query(vg_query, tuple(vg_params))
 
-    rows = db.query(query, tuple(params))
+    # Query 2: Provisional sales (from Google/Domain search)
+    prov_query = f"""
+        SELECT
+            id as sale_id,
+            COALESCE(house_number, '') || ' ' || COALESCE(street_name, '') as address,
+            suburb,
+            sold_price as price,
+            NULL as area_sqm,
+            NULL as zoning,
+            NULL as year_built,
+            listing_url,
+            bedrooms,
+            bathrooms,
+            car_spaces,
+            source_site,
+            sold_date,
+            'provisional' as source_type
+        FROM provisional_sales
+        WHERE review_status = 'pending'
+          AND review_sent_at IS NULL
+          AND status = 'unconfirmed'
+          AND sold_price > 0
+          AND LOWER(suburb) IN ({placeholders})
+          AND property_type = ?
+          AND date(sold_date) >= date('now', '-30 days')
+    """
+    prov_params = list(suburbs) + [seg.property_type]
 
-    if not rows:
+    # Apply segment-specific filters available on provisional_sales
+    if seg.bedrooms is not None:
+        prov_query += " AND bedrooms = ?"
+        prov_params.append(seg.bedrooms)
+    if seg.bathrooms is not None:
+        prov_query += " AND bathrooms = ?"
+        prov_params.append(seg.bathrooms)
+    if seg.car_spaces is not None:
+        prov_query += " AND car_spaces = ?"
+        prov_params.append(seg.car_spaces)
+
+    prov_query += " ORDER BY sold_date DESC LIMIT ?"
+    prov_params.append(limit)
+
+    prov_rows = db.query(prov_query, tuple(prov_params))
+
+    # Combine: provisional first (most recent), then VG, up to limit
+    all_rows = list(prov_rows) + list(vg_rows)
+    all_rows = all_rows[:limit]
+
+    if not all_rows:
         click.echo("No sales pending review")
         db.close()
         return
 
-    click.echo(f"Sending {len(rows)} sales for review in batched digest...")
+    prov_count = sum(1 for r in all_rows if r['source_type'] == 'provisional')
+    vg_count = len(all_rows) - prov_count
+    click.echo(f"Sending {len(all_rows)} sales for review ({prov_count} provisional, {vg_count} VG)...")
 
     if dry_run:
-        for row in rows:
-            click.echo(f"  Would send: {row['address']} - ${row['price']:,}")
+        for row in all_rows:
+            src = "[PROV]" if row['source_type'] == 'provisional' else "[VG]"
+            price = row['price'] or 0
+            click.echo(f"  {src} Would send: {row['address'].strip()}, {row['suburb']} - ${price:,}")
         db.close()
         return
 
@@ -1152,19 +1209,40 @@ def review_buttons(ctx, segment, limit, dry_run):
 
     # Build sales list with required fields
     sales_list = []
-    for row in rows:
-        # Create label fields
-        zoning_label = row['zoning'] if row['zoning'] else "Zoning unverified"
-        year_built_label = f"Built {row['year_built']}" if row['year_built'] else "Year unknown"
+    for row in all_rows:
+        if row['source_type'] == 'vg':
+            zoning_label = row['zoning'] if row['zoning'] else "Zoning unverified"
+            year_built_label = f"Built {row['year_built']}" if row['year_built'] else "Year unknown"
+        else:
+            # Provisional: use beds/baths/car info
+            parts = []
+            if row['bedrooms'] is not None:
+                parts.append(f"{row['bedrooms']}bed")
+            if row['bathrooms'] is not None:
+                parts.append(f"{row['bathrooms']}bath")
+            if row['car_spaces'] is not None:
+                parts.append(f"{row['car_spaces']}car")
+            zoning_label = "/".join(parts) if parts else "Details unknown"
+            # Show sold date for provisional
+            if row['sold_date']:
+                from datetime import datetime as dt
+                try:
+                    d = dt.strptime(row['sold_date'], '%Y-%m-%d')
+                    year_built_label = f"Sold {d.strftime('%-d %b %Y')}"
+                except (ValueError, TypeError):
+                    year_built_label = f"Sold {row['sold_date']}"
+            else:
+                year_built_label = row['source_site'] or "Google"
 
         sales_list.append({
             'sale_id': row['sale_id'],
-            'address': f"{row['address']}, {row['suburb']}",
+            'address': f"{row['address'].strip()}, {row['suburb']}",
             'price': row['price'],
             'area_sqm': row['area_sqm'],
             'zoning_label': zoning_label,
             'year_built_label': year_built_label,
             'listing_url': row['listing_url'],
+            'source_type': row['source_type'],
         })
 
     # Split into chunks of max 5 sales
@@ -1176,18 +1254,29 @@ def review_buttons(ctx, segment, limit, dry_run):
         success = send_review_digest(telegram_config, seg.display_name, chunk, segment)
 
         if success:
-            # Mark all sales in this chunk as sent
+            # Mark all sales in this chunk as sent (route to correct table)
             now = datetime.now(timezone.utc).isoformat()
             for sale in chunk:
-                db.execute(
-                    "UPDATE sale_classifications SET review_sent_at = ? WHERE sale_id = ?",
-                    (now, sale['sale_id'])
-                )
+                if sale.get('source_type') == 'provisional':
+                    db.execute(
+                        "UPDATE provisional_sales SET review_sent_at = ? WHERE id = ?",
+                        (now, sale['sale_id'])
+                    )
+                else:
+                    db.execute(
+                        "UPDATE sale_classifications SET review_sent_at = ? WHERE sale_id = ?",
+                        (now, sale['sale_id'])
+                    )
                 total_sent += 1
             click.echo(f"  Sent digest with {len(chunk)} sales")
 
-    click.echo(f"\nSent {total_sent}/{len(rows)} sales in {(len(sales_list) + chunk_size - 1) // chunk_size} digest(s)")
+    click.echo(f"\nSent {total_sent}/{len(all_rows)} sales in {(len(sales_list) + chunk_size - 1) // chunk_size} digest(s)")
     db.close()
+
+
+def _is_provisional_id(sale_id: str) -> bool:
+    """Check if sale_id is from a provisional source (google- or domain- prefix)."""
+    return sale_id.startswith('google-') or sale_id.startswith('domain-')
 
 
 @cli.command('review-poll')
@@ -1261,16 +1350,25 @@ def review_poll(ctx):
                     if len(button_parts) == 4 and button_parts[0] == 'review' and button_parts[2] != 'all':
                         sale_ids.append(button_parts[2])
 
-            # Update all sales
+            # Update all sales (route to correct table by ID type)
             for sid in sale_ids:
-                result = db.execute("""
-                    UPDATE sale_classifications
-                    SET review_status = ?,
-                        use_in_median = ?,
-                        reviewed_at = ?,
-                        updated_at = ?
-                    WHERE sale_id = ?
-                """, (status, use_in_median, now, now, sid))
+                if _is_provisional_id(sid):
+                    result = db.execute("""
+                        UPDATE provisional_sales
+                        SET review_status = ?,
+                            use_in_median = ?,
+                            reviewed_at = ?
+                        WHERE id = ?
+                    """, (status, use_in_median, now, sid))
+                else:
+                    result = db.execute("""
+                        UPDATE sale_classifications
+                        SET review_status = ?,
+                            use_in_median = ?,
+                            reviewed_at = ?,
+                            updated_at = ?
+                        WHERE sale_id = ?
+                    """, (status, use_in_median, now, now, sid))
 
                 if result > 0:
                     processed += 1
@@ -1278,15 +1376,24 @@ def review_poll(ctx):
 
             response_text = f"Marked all {len(sale_ids)} sales as {status}"
         else:
-            # Single sale update
-            result = db.execute("""
-                UPDATE sale_classifications
-                SET review_status = ?,
-                    use_in_median = ?,
-                    reviewed_at = ?,
-                    updated_at = ?
-                WHERE sale_id = ?
-            """, (status, use_in_median, now, now, sale_id))
+            # Single sale update (route to correct table by ID type)
+            if _is_provisional_id(sale_id):
+                result = db.execute("""
+                    UPDATE provisional_sales
+                    SET review_status = ?,
+                        use_in_median = ?,
+                        reviewed_at = ?
+                    WHERE id = ?
+                """, (status, use_in_median, now, sale_id))
+            else:
+                result = db.execute("""
+                    UPDATE sale_classifications
+                    SET review_status = ?,
+                        use_in_median = ?,
+                        reviewed_at = ?,
+                        updated_at = ?
+                    WHERE sale_id = ?
+                """, (status, use_in_median, now, now, sale_id))
 
             if result > 0:
                 processed += 1

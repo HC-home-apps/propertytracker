@@ -329,6 +329,21 @@ class Database:
         if 'source_site' not in ps_columns:
             conn.execute("ALTER TABLE provisional_sales ADD COLUMN source_site TEXT")
 
+        # Migrate provisional_sales: add review tracking columns
+        if 'review_status' not in ps_columns:
+            conn.execute("ALTER TABLE provisional_sales ADD COLUMN review_status TEXT DEFAULT 'pending'")
+        if 'reviewed_at' not in ps_columns:
+            conn.execute("ALTER TABLE provisional_sales ADD COLUMN reviewed_at TIMESTAMP")
+        if 'review_sent_at' not in ps_columns:
+            conn.execute("ALTER TABLE provisional_sales ADD COLUMN review_sent_at TIMESTAMP")
+        if 'use_in_median' not in ps_columns:
+            conn.execute("ALTER TABLE provisional_sales ADD COLUMN use_in_median BOOLEAN DEFAULT FALSE")
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_provisional_sales_review
+            ON provisional_sales(review_status, review_sent_at)
+        """)
+
         conn.commit()
 
     def upsert_raw_sales(self, sales: List[dict]) -> int:
