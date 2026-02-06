@@ -93,10 +93,9 @@ jobs:
               property_type: unit
               role: proxy
               filters:
-                streets: [lamont st, milner cres, shirley rd]
                 price_min: 1000000
                 price_max: 1500000
-              description: "2-bed units near Lamont St, $1.0M-$1.5M range, comparable to your PPOR"
+              description: "2-bed units in Wollstonecraft, $1.0M-$1.5M range"
               require_manual_review: true
 
             lane_cove_houses:
@@ -185,6 +184,16 @@ jobs:
           fi
           python -m tracker ingest $FORCE_FLAG
 
+      - name: Step 1b - Ingest Domain sold listings
+        env:
+          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
+        run: |
+          python -m tracker ingest-domain
+
+      - name: Step 1c - Match provisional sales to VG
+        run: |
+          python -m tracker match-provisional
+
       - name: Step 2a - Enrich new Revesby sales
         if: github.event.inputs.run_enrich != 'false'
         env:
@@ -214,6 +223,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_REPORT_CHAT_ID: ${{ secrets.TELEGRAM_REPORT_CHAT_ID }}
           SAVINGS_BALANCE: ${{ secrets.SAVINGS_BALANCE }}
           SAVINGS_MONTHLY: ${{ secrets.SAVINGS_MONTHLY }}
           PPOR_DEBT: ${{ secrets.PPOR_DEBT }}
@@ -225,15 +235,24 @@ jobs:
           fi
           python -m tracker notify $DRY_RUN_FLAG
 
-      - name: Step 6 - Send review requests (if pending)
+      - name: Step 6a - Process pending review responses
         if: github.event.inputs.run_enrich != 'false'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # Send review requests for both segments
-          python -m tracker review-send --segment revesby_houses || echo "No pending Revesby reviews"
-          python -m tracker review-send --segment wollstonecraft_units || echo "No pending Wollstonecraft reviews"
+          # Process any button responses from previous reviews
+          python -m tracker review-poll || echo "No pending responses"
+
+      - name: Step 6b - Send new reviews with buttons
+        if: github.event.inputs.run_enrich != 'false'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Send reviews with inline Yes/No buttons
+          python -m tracker review-buttons --segment revesby_houses --limit 10 || echo "No pending Revesby reviews"
+          python -m tracker review-buttons --segment wollstonecraft_units --limit 10 || echo "No pending Wollstonecraft reviews"
 
       - name: Save database to cache
         uses: actions/cache/save@v4
