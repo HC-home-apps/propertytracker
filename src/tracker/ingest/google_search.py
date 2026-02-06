@@ -1,5 +1,9 @@
 # src/tracker/ingest/google_search.py
-"""Scrape Google search results for recently sold properties."""
+"""Scrape DuckDuckGo search results for recently sold properties.
+
+Uses DuckDuckGo HTML version (html.duckduckgo.com) which works without
+JavaScript rendering. Searches site:domain.com.au for sold listings.
+"""
 
 import logging
 import random
@@ -22,7 +26,7 @@ DOMAIN_PRIORITY = {
     'allhomes.com.au': 3,
 }
 
-GOOGLE_SEARCH_URL = 'https://www.google.com/search'
+DDG_SEARCH_URL = 'https://html.duckduckgo.com/html/'
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -38,7 +42,7 @@ def build_search_query(
     bedrooms: Optional[int] = None,
     bathrooms: Optional[int] = None,
 ) -> str:
-    """Build a Google search query string for sold properties.
+    """Build a search query string for sold properties on domain.com.au.
 
     Args:
         suburb: Suburb name (e.g. 'Wollstonecraft')
@@ -51,7 +55,7 @@ def build_search_query(
     """
     type_label = 'apartment' if property_type == 'unit' else 'house'
 
-    parts = ['sold', suburb]
+    parts = ['site:domain.com.au', 'sold', suburb]
     if bedrooms is not None:
         parts.append(f'{bedrooms} bed')
     if bathrooms is not None:
@@ -62,12 +66,12 @@ def build_search_query(
 
 
 def parse_search_results_html(html: str) -> List[dict]:
-    """Parse Google search results HTML and extract real estate listings.
+    """Parse DuckDuckGo HTML search results and extract real estate listings.
 
     Filters to results from known real estate domains only.
 
     Args:
-        html: Raw HTML from Google search results page
+        html: Raw HTML from DuckDuckGo search results page
 
     Returns:
         List of dicts with keys: url, title, snippet, source_site
@@ -75,8 +79,9 @@ def parse_search_results_html(html: str) -> List[dict]:
     soup = BeautifulSoup(html, 'html.parser')
     results = []
 
-    for div in soup.select('div.g'):
-        link = div.select_one('a[href]')
+    for div in soup.select('div.result'):
+        # DDG HTML structure: h2.result__title > a.result__a
+        link = div.select_one('a.result__a')
         if not link:
             continue
 
@@ -85,11 +90,10 @@ def parse_search_results_html(html: str) -> List[dict]:
         if not source_site:
             continue
 
-        title_el = div.select_one('h3')
-        title = title_el.get_text(strip=True) if title_el else ''
+        title = link.get_text(strip=True)
 
-        # Snippet can be in several elements
-        snippet_el = div.select_one('div.VwiC3b') or div.select_one('[data-sncf]')
+        # Snippet: a.result__snippet
+        snippet_el = div.select_one('a.result__snippet')
         snippet = snippet_el.get_text(strip=True) if snippet_el else ''
 
         results.append({
@@ -114,7 +118,7 @@ def _match_real_estate_domain(url: str) -> Optional[str]:
 
 
 def extract_listing_data(result: dict, suburb: str, postcode: str) -> dict:
-    """Extract structured listing data from a Google search result.
+    """Extract structured listing data from a search result.
 
     Args:
         result: Dict with url, title, snippet, source_site
@@ -132,7 +136,7 @@ def extract_listing_data(result: dict, suburb: str, postcode: str) -> dict:
     unit_number, house_number, street_name = _parse_address_from_title(title, suburb)
 
     # Parse price
-    sold_price, price_withheld = _parse_price(snippet)
+    sold_price, price_withheld = _parse_price(combined_text)
 
     # Parse bedrooms/bathrooms/car
     bedrooms = _parse_int_field(combined_text, r'(\d+)\s*bed')
@@ -142,8 +146,8 @@ def extract_listing_data(result: dict, suburb: str, postcode: str) -> dict:
     # Parse area
     area_sqm = _parse_area(combined_text)
 
-    # Parse sold date
-    sold_date = _parse_sold_date(snippet)
+    # Parse sold date from combined text (title has "Sold DD Mon", snippet has "on DD Mon")
+    sold_date = _parse_sold_date(combined_text)
 
     # Normalise address
     address_normalised = normalise_address(
@@ -174,28 +178,24 @@ def extract_listing_data(result: dict, suburb: str, postcode: str) -> dict:
 
 
 def _parse_address_from_title(title: str, suburb: str) -> tuple:
-    """Parse address components from a Google result title.
+    """Parse address components from a search result title.
 
     Handles formats like:
-    - "5/10 Shirley Rd, Wollstonecraft NSW 2065"  (unit)
-    - "15 Alliance Ave, Revesby NSW 2212"          (house)
-    - "5/10 Shirley Road Wollstonecraft"           (no comma)
+    - "5/10 Shirley Rd, Wollstonecraft NSW 2065 - Sold ..."  (unit)
+    - "15 Alliance Ave, Revesby NSW 2212 - Sold ..."          (house)
 
     Returns:
         (unit_number, house_number, street_name) tuple
     """
-    # Strip suburb/state/postcode suffix (handle comma or no comma)
-    # Remove everything from the suburb name onwards (case insensitive)
     cleaned = title
     if suburb:
-        # Strip from comma before suburb, or just the suburb onwards
         pattern = re.compile(
             r'[,\s]*\b' + re.escape(suburb) + r'\b.*$',
             re.IGNORECASE,
         )
         cleaned = pattern.sub('', cleaned).strip()
 
-    # Also strip common suffixes like " - Domain.com.au", " | realestate.com.au"
+    # Strip common suffixes like " - Domain.com.au", " | realestate.com.au"
     cleaned = re.sub(r'\s*[-|].*$', '', cleaned).strip()
 
     # Strip trailing state/postcode if still present (e.g., "NSW 2065")
@@ -272,18 +272,35 @@ def _parse_area(text: str) -> Optional[float]:
 
 
 def _parse_sold_date(text: str) -> Optional[str]:
-    """Parse sold date from snippet text.
+    """Parse sold date from text.
 
-    Handles formats like: "Sold on 15 Jan 2026", "Sold 15/01/2026"
+    Handles formats like:
+    - "Sold on 15 Jan 2026"
+    - "Sold 15/01/2026"
+    - "sold for $1,100,000 on 06 Dec 2025"
+    - "- Sold 06 Dec 2025"
     """
-    # "Sold on DD Mon YYYY" or "Sold DD Mon YYYY"
     month_map = {
         'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
         'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
         'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
     }
+
+    # "Sold on DD Mon YYYY" or "Sold DD Mon YYYY" (direct after Sold)
     match = re.search(
         r'[Ss]old\s+(?:on\s+)?(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',
+        text,
+        re.IGNORECASE,
+    )
+    if match:
+        day = match.group(1).zfill(2)
+        month = month_map.get(match.group(2).lower(), '01')
+        year = match.group(3)
+        return f'{year}-{month}-{day}'
+
+    # "on DD Mon YYYY" anywhere (e.g., "sold for $X on 06 Dec 2025")
+    match = re.search(
+        r'\bon\s+(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})',
         text,
         re.IGNORECASE,
     )
@@ -332,11 +349,9 @@ def _deduplicate_results(listings: List[dict]) -> List[dict]:
             new_priority = DOMAIN_PRIORITY.get(listing.get('source_site', ''), 99)
 
             if new_priority < existing_priority:
-                # New listing has higher priority - use it as base, merge from existing
                 merged = _merge_listings(listing, existing)
                 by_address[addr] = merged
             else:
-                # Existing has higher priority - merge from new listing
                 merged = _merge_listings(existing, listing)
                 by_address[addr] = merged
 
@@ -344,15 +359,7 @@ def _deduplicate_results(listings: List[dict]) -> List[dict]:
 
 
 def _merge_listings(primary: dict, secondary: dict) -> dict:
-    """Merge two listings, filling missing fields in primary from secondary.
-
-    Args:
-        primary: The preferred listing (used as base)
-        secondary: The fallback listing (fills gaps only)
-
-    Returns:
-        Merged listing dict
-    """
+    """Merge two listings, filling missing fields in primary from secondary."""
     merged = dict(primary)
     for key, value in secondary.items():
         if merged.get(key) is None and value is not None:
@@ -367,11 +374,9 @@ def fetch_sold_listings_google(
     bedrooms: Optional[int] = None,
     bathrooms: Optional[int] = None,
 ) -> List[dict]:
-    """Fetch sold listings by scraping Google search results.
+    """Fetch sold listings by searching DuckDuckGo for domain.com.au results.
 
-    Main entry point for Google search-based sold listing discovery.
-    Uses anti-blocking measures: random user agent, random delay, AU locale.
-
+    Uses DuckDuckGo HTML version which works without JavaScript.
     Returns empty list on any error (graceful degradation).
 
     Args:
@@ -386,39 +391,35 @@ def fetch_sold_listings_google(
     """
     try:
         query = build_search_query(suburb, property_type, bedrooms, bathrooms)
-        logger.info(f"Google search query: {query}")
+        logger.info(f"DuckDuckGo search query: {query}")
 
-        # Anti-blocking: random delay between 2-5 seconds
+        # Rate limiting: random delay between 2-5 seconds
         delay = random.uniform(2.0, 5.0)
         time.sleep(delay)
 
-        # Anti-blocking: random user agent
         headers = {
             'User-Agent': random.choice(USER_AGENTS),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-AU,en;q=0.9',
+            'Referer': 'https://html.duckduckgo.com/',
         }
 
-        params = {
-            'q': query,
-            'gl': 'au',
-            'hl': 'en',
-            'num': 20,
-        }
+        # DDG HTML version uses POST with form data
+        data = {'q': query}
 
-        response = requests.get(
-            GOOGLE_SEARCH_URL,
+        response = requests.post(
+            DDG_SEARCH_URL,
             headers=headers,
-            params=params,
+            data=data,
             timeout=30,
         )
 
         if response.status_code != 200:
-            logger.warning(f"Google search returned HTTP {response.status_code} for query: {query}")
+            logger.warning(f"DuckDuckGo returned HTTP {response.status_code} for query: {query}")
             return []
 
         raw_results = parse_search_results_html(response.text)
-        logger.info(f"Parsed {len(raw_results)} real estate results from Google")
+        logger.info(f"Parsed {len(raw_results)} real estate results from DuckDuckGo")
 
         listings = []
         for result in raw_results:
@@ -431,8 +432,8 @@ def fetch_sold_listings_google(
         return deduplicated
 
     except requests.RequestException as e:
-        logger.error(f"Google search request failed: {e}")
+        logger.error(f"DuckDuckGo search request failed: {e}")
         return []
     except Exception as e:
-        logger.error(f"Unexpected error in Google search scraper: {e}")
+        logger.error(f"Unexpected error in DuckDuckGo search scraper: {e}")
         return []
