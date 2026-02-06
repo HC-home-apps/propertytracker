@@ -432,10 +432,13 @@ def fetch_sold_listings_google(
         query = build_search_query(suburb, property_type, bedrooms, bathrooms)
         logger.info(f"DuckDuckGo search query: {query}")
 
-        # Progressive rate limiting: increase delay for successive requests
-        # to avoid DDG 202 CAPTCHA on 3rd+ request in a session
-        base_delay = 8.0 + (_ddg_request_count - 1) * 15.0  # 8s, 23s, 38s, ...
-        delay = random.uniform(base_delay, base_delay + 7.0)
+        # DDG aggressively rate-limits from the same IP.  One successful
+        # request flags the IP, so subsequent requests need a long cooldown.
+        # First request: 5s, subsequent: 60-75s each.
+        if _ddg_request_count == 1:
+            delay = random.uniform(3.0, 5.0)
+        else:
+            delay = random.uniform(60.0, 75.0)
         logger.info(f"DDG rate limit delay: {delay:.0f}s (request #{_ddg_request_count})")
         time.sleep(delay)
 
@@ -449,8 +452,8 @@ def fetch_sold_listings_google(
         # DDG HTML version uses POST with form data
         data = {'q': query}
 
-        # Retry once on 202 (CAPTCHA/rate limit) with longer backoff
-        max_attempts = 2
+        # Retry twice on 202 (CAPTCHA/rate limit) with long backoff
+        max_attempts = 3
         response = None
         for attempt in range(max_attempts):
             response = requests.post(
@@ -464,8 +467,8 @@ def fetch_sold_listings_google(
                 break
 
             if response.status_code == 202 and attempt < max_attempts - 1:
-                backoff = random.uniform(60.0, 90.0)
-                logger.info(f"DDG returned 202 (rate limit), retrying in {backoff:.0f}s...")
+                backoff = random.uniform(90.0, 120.0)
+                logger.info(f"DDG returned 202 (rate limit), attempt {attempt + 1}/{max_attempts}, retrying in {backoff:.0f}s...")
                 time.sleep(backoff)
                 continue
 
