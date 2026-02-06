@@ -47,8 +47,7 @@ jobs:
       - name: Process review response
         if: github.event_name == 'repository_dispatch'
         env:
-          SALE_ID: ${{ github.event.client_payload.sale_id }}
-          SALE_IDS: ${{ github.event.client_payload.sale_ids }}
+          SALE_IDS: ${{ toJson(github.event.client_payload.sale_ids) }}
           RESPONSE: ${{ github.event.client_payload.response }}
           SEGMENT_CODE: ${{ github.event.client_payload.segment_code }}
         run: |
@@ -61,8 +60,8 @@ jobs:
           db = Database('data/tracker.db')
           db.init_schema()
 
-          sale_id = os.environ.get('SALE_ID', '')
-          sale_ids_json = os.environ.get('SALE_IDS', '')
+          sale_ids_json = os.environ.get('SALE_IDS', '[]')
+          sale_ids = json.loads(sale_ids_json)
           response = os.environ['RESPONSE']
           segment = os.environ.get('SEGMENT_CODE', '')
 
@@ -70,25 +69,17 @@ jobs:
           use_in_median = 1 if response == 'yes' else 0
           now = datetime.now(timezone.utc).isoformat()
 
-          # Handle bulk update if sale_ids is provided (from 'all' button)
-          if sale_ids_json:
-              sale_ids = json.loads(sale_ids_json)
-              for sid in sale_ids:
-                  result = db.execute('''
-                      UPDATE sale_classifications
-                      SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
-                      WHERE sale_id = ?
-                  ''', (status, use_in_median, now, now, sid))
-                  print(f'{sid} ({segment}): {status} (rows updated: {result})')
-          else:
-              # Single sale update
+          total_updated = 0
+          for sale_id in sale_ids:
               result = db.execute('''
                   UPDATE sale_classifications
                   SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
                   WHERE sale_id = ?
               ''', (status, use_in_median, now, now, sale_id))
-              print(f'{sale_id} ({segment}): {status} (rows updated: {result})')
+              total_updated += result
+              print(f'{sale_id} ({segment}): {status}')
 
+          print(f'Total rows updated: {total_updated}')
           db.close()
           "
 
