@@ -47,6 +47,9 @@ class TestMatchProvisionalToVG:
             'property_type': 'unit',
             'sold_price': 1200000,
             'sold_date': '2026-02-03',
+            'bedrooms': None,
+            'bathrooms': None,
+            'car_spaces': None,
             'address_normalised': '9|27|morton st|wollstonecraft|2065',
             'raw_json': '{}',
         }])
@@ -90,6 +93,9 @@ class TestMatchProvisionalToVG:
             'property_type': 'unit',
             'sold_price': 1200000,
             'sold_date': '2026-02-03',
+            'bedrooms': None,
+            'bathrooms': None,
+            'car_spaces': None,
             'address_normalised': '9|27|morton st|wollstonecraft|2065',
             'raw_json': '{}',
         }])
@@ -130,6 +136,9 @@ class TestMatchProvisionalToVG:
             'property_type': 'unit',
             'sold_price': 1200000,
             'sold_date': '2026-02-01',
+            'bedrooms': None,
+            'bathrooms': None,
+            'car_spaces': None,
             'address_normalised': '9|27|morton st|wollstonecraft|2065',
             'raw_json': '{}',
         }])

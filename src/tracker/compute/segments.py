@@ -25,6 +25,9 @@ class Segment:
     streets: Optional[FrozenSet[str]] = None  # Street name filter (lowercase)
     price_min: Optional[int] = None     # Min price filter ($)
     price_max: Optional[int] = None     # Max price filter ($)
+    bedrooms: Optional[int] = None      # Bedroom count filter
+    bathrooms: Optional[int] = None     # Bathroom count filter
+    car_spaces: Optional[int] = None    # Car space count filter
     require_manual_review: bool = False # Require manual review for comparability
 
     @property
@@ -39,13 +42,16 @@ class Segment:
 
     @property
     def has_filters(self) -> bool:
-        """Does this segment have area, street, or price filters?"""
+        """Does this segment have area, street, price, or bedroom filters?"""
         return (
             self.area_min is not None
             or self.area_max is not None
             or self.streets is not None
             or self.price_min is not None
             or self.price_max is not None
+            or self.bedrooms is not None
+            or self.bathrooms is not None
+            or self.car_spaces is not None
         )
 
     def get_filter_description(self) -> Optional[str]:
@@ -65,6 +71,15 @@ class Segment:
                 parts.append(f"≥${self.price_min/1e6:.1f}M")
             elif self.price_max:
                 parts.append(f"≤${self.price_max/1e6:.1f}M")
+        bed_bath_car = []
+        if self.bedrooms is not None:
+            bed_bath_car.append(f"{self.bedrooms}bed")
+        if self.bathrooms is not None:
+            bed_bath_car.append(f"{self.bathrooms}bath")
+        if self.car_spaces is not None:
+            bed_bath_car.append(f"{self.car_spaces}car")
+        if bed_bath_car:
+            parts.append("/".join(bed_bath_car))
         if self.streets:
             street_list = '/'.join(sorted(s.title() for s in self.streets))
             parts.append(f"{street_list} streets")
@@ -99,6 +114,9 @@ def load_segments_from_config(config: dict) -> Dict[str, Segment]:
         streets = frozenset(s.lower().strip() for s in streets_list) if streets_list else None
         price_min = filters.get('price_min')
         price_max = filters.get('price_max')
+        bedrooms = filters.get('bedrooms')
+        bathrooms = filters.get('bathrooms')
+        car_spaces = filters.get('car_spaces')
 
         segment = Segment(
             code=code,
@@ -112,6 +130,9 @@ def load_segments_from_config(config: dict) -> Dict[str, Segment]:
             streets=streets,
             price_min=price_min,
             price_max=price_max,
+            bedrooms=bedrooms,
+            bathrooms=bathrooms,
+            car_spaces=car_spaces,
             require_manual_review=seg_config.get('require_manual_review', False),
         )
         segments[code] = segment

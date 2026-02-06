@@ -442,3 +442,43 @@ class TestProvisionalSalesInReport:
             provisional_sales=[],
         )
         assert 'Recent Unconfirmed' not in report
+
+    def test_grouped_provisional_with_bedrooms(self):
+        from tracker.notify.telegram import format_simple_report
+        provisional_by_segment = {
+            'wollstonecraft_units': [
+                {
+                    'unit_number': '9',
+                    'house_number': '27-29',
+                    'street_name': 'Morton St',
+                    'suburb': 'Wollstonecraft',
+                    'sold_price': 1200000,
+                    'sold_date': '2026-02-03',
+                    'property_type': 'unit',
+                    'bedrooms': 2,
+                    'bathrooms': 1,
+                    'car_spaces': 1,
+                },
+            ],
+        }
+        report = format_simple_report(
+            new_sales={},
+            positions={},
+            period='Feb 6, 2026',
+            config={'report': {'show_proxies': ['wollstonecraft_units']}},
+            provisional_by_segment=provisional_by_segment,
+        )
+        assert 'Recent Unconfirmed' in report
+        assert 'Morton St' in report
+        assert '2bed/1bath/1car' in report
+
+    def test_no_grouped_section_when_all_empty(self):
+        from tracker.notify.telegram import format_simple_report
+        report = format_simple_report(
+            new_sales={},
+            positions={},
+            period='Feb 6, 2026',
+            config={'report': {'show_proxies': []}},
+            provisional_by_segment={'wollstonecraft_units': []},
+        )
+        assert 'Recent Unconfirmed' not in report

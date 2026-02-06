@@ -64,6 +64,14 @@ def parse_sold_listing(raw: dict) -> Optional[dict]:
     postcode = raw.get('postcode', '')
     sold_date = raw.get('soldDate', '')
 
+    # Parse bedrooms/bathrooms/car spaces (may not be present in all responses)
+    bedrooms = raw.get('bedrooms')
+    bathrooms = raw.get('bathrooms')
+    car_spaces = raw.get('carSpaces') or raw.get('carspaces')
+    bedrooms = int(bedrooms) if bedrooms is not None else None
+    bathrooms = int(bathrooms) if bathrooms is not None else None
+    car_spaces = int(car_spaces) if car_spaces is not None else None
+
     address_normalised = normalise_address(
         unit_number=unit_number,
         house_number=house_number,
@@ -83,6 +91,9 @@ def parse_sold_listing(raw: dict) -> Optional[dict]:
         'property_type': property_type,
         'sold_price': int(price),
         'sold_date': sold_date,
+        'bedrooms': bedrooms,
+        'bathrooms': bathrooms,
+        'car_spaces': car_spaces,
         'address_normalised': address_normalised,
         'raw_json': json.dumps(raw),
     }

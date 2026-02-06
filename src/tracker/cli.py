@@ -3,7 +3,7 @@
 
 import logging
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -417,12 +417,31 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
             selling_cost_rate=selling_cost_rate,
         )
 
-    # Fetch unconfirmed provisional sales for report
-    provisional_sales = db.get_unconfirmed_provisional_sales()
+    # Fetch unconfirmed provisional sales for report, filtered by segment
+    provisional_by_segment = {}
+    all_segment_codes = show_proxies + report_config.get('show_targets', [])
+    for segment_code in all_segment_codes:
+        seg = SEGMENTS.get(segment_code)
+        if not seg:
+            continue
+        for suburb in seg.suburbs:
+            segment_provisional = db.get_unconfirmed_provisional_sales_filtered(
+                suburb=suburb,
+                property_type=seg.property_type,
+                bedrooms=seg.bedrooms,
+                bathrooms=seg.bathrooms,
+                car_spaces=seg.car_spaces,
+            )
+            if segment_code not in provisional_by_segment:
+                provisional_by_segment[segment_code] = []
+            provisional_by_segment[segment_code].extend(segment_provisional)
 
     # Format report
     period_str = reference_date.strftime('%b %-d, %Y')
-    message = format_simple_report(new_sales, positions, period_str, config, provisional_sales)
+    message = format_simple_report(
+        new_sales, positions, period_str, config,
+        provisional_by_segment=provisional_by_segment,
+    )
 
     if dry_run:
         click.echo("\n--- DRY RUN ---")
@@ -430,7 +449,10 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
         click.echo("--- END ---\n")
     else:
         telegram_config = TelegramConfig.from_env()
-        success = send_simple_report(telegram_config, new_sales, positions, period_str, config, provisional_sales)
+        success = send_simple_report(
+            telegram_config, new_sales, positions, period_str, config,
+            provisional_by_segment=provisional_by_segment,
+        )
 
         if success:
             click.echo("Report sent successfully!")
@@ -996,6 +1018,7 @@ def review_buttons(ctx, segment, limit, dry_run):
         JOIN raw_sales r ON sc.sale_id = r.dealing_number
         WHERE sc.review_status = 'pending'
           AND sc.is_auto_excluded = 0
+          AND sc.review_sent_at IS NULL
           AND LOWER(r.suburb) IN ({placeholders})
           AND r.property_type = ?
         ORDER BY r.contract_date DESC
@@ -1035,6 +1058,12 @@ def review_buttons(ctx, segment, limit, dry_run):
         if success:
             sent += 1
             click.echo(f"  Sent: {row['address']}")
+            # Mark as sent so it won't be re-sent on next run
+            now = datetime.now(timezone.utc).isoformat()
+            db.execute(
+                "UPDATE sale_classifications SET review_sent_at = ? WHERE sale_id = ?",
+                (now, row['sale_id'])
+            )
 
     click.echo(f"\nSent {sent}/{len(rows)} review requests")
     db.close()

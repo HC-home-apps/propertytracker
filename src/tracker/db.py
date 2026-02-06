@@ -245,6 +245,7 @@ class Database:
                 review_status TEXT DEFAULT 'pending'
                     CHECK(review_status IN ('pending', 'comparable', 'not_comparable')),
                 reviewed_at TIMESTAMP,
+                review_sent_at TIMESTAMP,
                 review_notes TEXT,
                 use_in_median BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -274,6 +275,9 @@ class Database:
                 property_type TEXT CHECK(property_type IN ('house', 'unit', 'land', 'other')),
                 sold_price INTEGER,
                 sold_date DATE,
+                bedrooms INTEGER,
+                bathrooms INTEGER,
+                car_spaces INTEGER,
                 address_normalised TEXT,
                 matched_dealing_number TEXT,
                 status TEXT DEFAULT 'unconfirmed'
@@ -291,6 +295,26 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_provisional_sales_suburb
             ON provisional_sales(suburb, sold_date)
         """)
+
+        conn.commit()
+        self._migrate_schema()
+
+    def _migrate_schema(self):
+        """Apply incremental schema migrations for existing databases."""
+        conn = self._get_conn()
+
+        # Migrate sale_classifications: add review_sent_at
+        cursor = conn.execute("PRAGMA table_info(sale_classifications)")
+        sc_columns = {row[1] for row in cursor.fetchall()}
+        if 'review_sent_at' not in sc_columns:
+            conn.execute("ALTER TABLE sale_classifications ADD COLUMN review_sent_at TIMESTAMP")
+
+        # Migrate provisional_sales: add bedrooms, bathrooms, car_spaces
+        cursor = conn.execute("PRAGMA table_info(provisional_sales)")
+        ps_columns = {row[1] for row in cursor.fetchall()}
+        for col in ['bedrooms', 'bathrooms', 'car_spaces']:
+            if col not in ps_columns:
+                conn.execute(f"ALTER TABLE provisional_sales ADD COLUMN {col} INTEGER")
 
         conn.commit()
 
@@ -419,10 +443,12 @@ class Database:
             INSERT OR IGNORE INTO provisional_sales (
                 id, source, unit_number, house_number, street_name,
                 suburb, postcode, property_type, sold_price, sold_date,
+                bedrooms, bathrooms, car_spaces,
                 address_normalised, raw_json
             ) VALUES (
                 :id, :source, :unit_number, :house_number, :street_name,
                 :suburb, :postcode, :property_type, :sold_price, :sold_date,
+                :bedrooms, :bathrooms, :car_spaces,
                 :address_normalised, :raw_json
             )
         """
@@ -462,3 +488,42 @@ class Database:
                WHERE id = ?""",
             (dealing_number, provisional_id)
         )
+
+    def get_unconfirmed_provisional_sales_filtered(
+        self,
+        suburb: str = None,
+        property_type: str = None,
+        bedrooms: int = None,
+        bathrooms: int = None,
+        car_spaces: int = None,
+        price_min: int = None,
+        price_max: int = None,
+    ) -> list:
+        """Get unconfirmed provisional sales with optional filtering."""
+        query = "SELECT * FROM provisional_sales WHERE status = 'unconfirmed'"
+        params = []
+
+        if suburb:
+            query += " AND LOWER(suburb) = LOWER(?)"
+            params.append(suburb)
+        if property_type:
+            query += " AND property_type = ?"
+            params.append(property_type)
+        if bedrooms is not None:
+            query += " AND bedrooms = ?"
+            params.append(bedrooms)
+        if bathrooms is not None:
+            query += " AND bathrooms = ?"
+            params.append(bathrooms)
+        if car_spaces is not None:
+            query += " AND car_spaces = ?"
+            params.append(car_spaces)
+        if price_min is not None:
+            query += " AND sold_price >= ?"
+            params.append(price_min)
+        if price_max is not None:
+            query += " AND sold_price <= ?"
+            params.append(price_max)
+
+        query += " ORDER BY sold_date DESC"
+        return self.query(query, tuple(params))

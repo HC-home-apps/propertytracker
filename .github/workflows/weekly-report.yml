@@ -95,7 +95,10 @@ jobs:
               filters:
                 price_min: 1000000
                 price_max: 1500000
-              description: "2-bed units in Wollstonecraft, $1.0M-$1.5M range"
+                bedrooms: 2
+                bathrooms: 1
+                car_spaces: 1
+              description: "2/1/1 units in Wollstonecraft, $1.0M-$1.5M range"
               require_manual_review: true
 
             lane_cove_houses:

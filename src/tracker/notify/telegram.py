@@ -667,12 +667,44 @@ def compute_segment_position(
     )
 
 
+def _format_provisional_address(sale: dict) -> str:
+    """Format address from provisional sale dict."""
+    unit = sale.get('unit_number', '')
+    house = sale.get('house_number', '')
+    street = sale.get('street_name', '')
+    suburb = sale.get('suburb', '')
+
+    addr_parts = []
+    if unit:
+        addr_parts.append(f"{unit}/")
+    if house:
+        addr_parts.append(f"{house} ")
+    addr_parts.append(f"{street}, {suburb}")
+    return "".join(addr_parts)
+
+
+def _format_bed_bath_car(sale: dict) -> str:
+    """Format bedroom/bath/car info if available."""
+    parts = []
+    bed = sale.get('bedrooms')
+    bath = sale.get('bathrooms')
+    car = sale.get('car_spaces')
+    if bed is not None:
+        parts.append(f"{bed}bed")
+    if bath is not None:
+        parts.append(f"{bath}bath")
+    if car is not None:
+        parts.append(f"{car}car")
+    return "/".join(parts)
+
+
 def format_simple_report(
     new_sales: Dict[str, List],  # segment_code -> list of SaleRecord
     positions: Dict[str, SegmentPosition],  # segment_code -> SegmentPosition
     period: str,
     config: Optional[dict] = None,
     provisional_sales: Optional[List[dict]] = None,
+    provisional_by_segment: Optional[Dict[str, List[dict]]] = None,
 ) -> str:
     """
     Format a simplified weekly report.
@@ -757,27 +789,44 @@ def format_simple_report(
             lines.append(f"{pos.display_name}: {median_str} median")
 
     # Section 3: Recent Unconfirmed Sales (Domain)
-    if provisional_sales:
+    has_provisional = False
+    if provisional_by_segment:
+        for seg_code, sales in provisional_by_segment.items():
+            if sales:
+                has_provisional = True
+                break
+
+    if has_provisional:
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("<b>Recent Unconfirmed Sales (Domain)</b>")
+        for seg_code, sales in provisional_by_segment.items():
+            if not sales:
+                continue
+            seg = get_segment(seg_code)
+            seg_name = seg.display_name if seg else seg_code
+            lines.append(f"\n<b>{seg_name}</b>")
+            for sale in sales:
+                address = _format_provisional_address(sale)
+                price = sale.get('sold_price', 0)
+                sold_date = sale.get('sold_date', '')
+                bed_info = _format_bed_bath_car(sale)
+                line = f"  {sold_date}: {address} - {format_currency(price)}"
+                if bed_info:
+                    line += f" ({bed_info})"
+                lines.append(line)
+        lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
+    elif provisional_sales:
+        # Fallback: flat list (backward compatible)
         lines.append("")
         lines.append("---")
         lines.append("")
         lines.append("<b>Recent Unconfirmed Sales (Domain)</b>")
         for sale in provisional_sales:
-            unit = sale.get('unit_number', '')
-            house = sale.get('house_number', '')
-            street = sale.get('street_name', '')
-            suburb = sale.get('suburb', '')
+            address = _format_provisional_address(sale)
             price = sale.get('sold_price', 0)
             sold_date = sale.get('sold_date', '')
-
-            addr_parts = []
-            if unit:
-                addr_parts.append(f"{unit}/")
-            if house:
-                addr_parts.append(f"{house} ")
-            addr_parts.append(f"{street}, {suburb}")
-            address = "".join(addr_parts)
-
             lines.append(f"  {sold_date}: {address} - {format_currency(price)}")
         lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
 
@@ -791,7 +840,12 @@ def send_simple_report(
     period: str,
     app_config: Optional[dict] = None,
     provisional_sales: Optional[List[dict]] = None,
+    provisional_by_segment: Optional[Dict[str, List[dict]]] = None,
 ) -> bool:
     """Send the simplified report via Telegram (to report chat if configured)."""
-    message = format_simple_report(new_sales, positions, period, app_config, provisional_sales)
+    message = format_simple_report(
+        new_sales, positions, period, app_config,
+        provisional_sales=provisional_sales,
+        provisional_by_segment=provisional_by_segment,
+    )
     return send_message(config, message, use_report_chat=True)
