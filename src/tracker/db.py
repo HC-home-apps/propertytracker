@@ -457,12 +457,12 @@ class Database:
                 id, source, unit_number, house_number, street_name,
                 suburb, postcode, property_type, sold_price, sold_date,
                 bedrooms, bathrooms, car_spaces,
-                address_normalised, raw_json
+                address_normalised, listing_url, source_site, status, raw_json
             ) VALUES (
                 :id, :source, :unit_number, :house_number, :street_name,
                 :suburb, :postcode, :property_type, :sold_price, :sold_date,
                 :bedrooms, :bathrooms, :car_spaces,
-                :address_normalised, :raw_json
+                :address_normalised, :listing_url, :source_site, :status, :raw_json
             )
         """
 

@@ -51,6 +51,9 @@ class TestMatchProvisionalToVG:
             'bathrooms': None,
             'car_spaces': None,
             'address_normalised': '9|27|morton st|wollstonecraft|2065',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
             'raw_json': '{}',
         }])
 
@@ -97,6 +100,9 @@ class TestMatchProvisionalToVG:
             'bathrooms': None,
             'car_spaces': None,
             'address_normalised': '9|27|morton st|wollstonecraft|2065',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
             'raw_json': '{}',
         }])
 
@@ -140,6 +146,9 @@ class TestMatchProvisionalToVG:
             'bathrooms': None,
             'car_spaces': None,
             'address_normalised': '9|27|morton st|wollstonecraft|2065',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
             'raw_json': '{}',
         }])
 

@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import requests
 
 from tracker.ingest.normalise import normalise_address
+from tracker.ingest.google_search import fetch_sold_listings_google
 
 logger = logging.getLogger(__name__)
 
@@ -95,57 +96,112 @@ def parse_sold_listing(raw: dict) -> Optional[dict]:
         'bathrooms': bathrooms,
         'car_spaces': car_spaces,
         'address_normalised': address_normalised,
+        'listing_url': None,  # Domain API doesn't provide listing URLs
+        'source_site': None,
+        'status': 'unconfirmed',
         'raw_json': json.dumps(raw),
     }
 
 
 def fetch_sold_listings(
-    suburb: str, property_type: str, postcode: str, api_key: Optional[str] = None,
+    suburb: str,
+    property_type: str,
+    postcode: str,
+    api_key: Optional[str] = None,
+    bedrooms: Optional[int] = None,
+    bathrooms: Optional[int] = None,
 ) -> List[dict]:
-    """Fetch recent sold listings from Domain API for a suburb.
+    """Fetch recent sold listings using Google search (primary) and Domain API (bonus).
 
-    Returns list of parsed provisional sale records, or empty list on error.
+    Args:
+        suburb: Suburb name
+        property_type: 'house' or 'unit'
+        postcode: Postcode
+        api_key: Optional Domain API key (for bonus data)
+        bedrooms: Optional bedroom count for unit searches
+        bathrooms: Optional bathroom count for unit searches
+
+    Returns:
+        List of parsed provisional sale records with listing_url, source_site, and status fields.
     """
-    if not api_key:
-        logger.debug("No Domain API key, skipping sold listings fetch")
-        return []
+    results = []
 
-    params = build_sold_search_params(suburb, property_type, postcode)
-
-    headers = {
-        'X-Api-Key': api_key,
-        'Accept': 'application/json',
-    }
-
+    # Primary source: Google search (always try, it's free)
     try:
-        time.sleep(RATE_LIMIT_DELAY)
+        google_results = fetch_sold_listings_google(
+            suburb=suburb,
+            property_type=property_type,
+            postcode=postcode,
+            bedrooms=bedrooms,
+            bathrooms=bathrooms,
+        )
 
-        url = f"{DOMAIN_API_BASE}/salesResults/{suburb}"
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        for listing in google_results:
+            # Convert Google search format to provisional_sales format
+            # Generate a unique ID from the normalised address
+            addr_hash = hash(listing['address_normalised'])
+            sale_id = f"google-{abs(addr_hash)}"
 
-        if response.status_code != 200:
-            logger.warning(f"Domain sold listings API returned {response.status_code} for {suburb}")
-            return []
+            # Set status based on price_withheld flag
+            status = 'price_withheld' if listing.get('price_withheld', False) else 'unconfirmed'
 
-        listings = response.json()
-        if not isinstance(listings, list):
-            listings = listings.get('listings', [])
+            results.append({
+                'id': sale_id,
+                'source': 'google',
+                'unit_number': listing.get('unit_number'),
+                'house_number': listing.get('house_number', ''),
+                'street_name': listing.get('street_name', ''),
+                'suburb': listing.get('suburb', suburb),
+                'postcode': listing.get('postcode', postcode),
+                'property_type': property_type,
+                'sold_price': listing.get('sold_price'),
+                'sold_date': listing.get('sold_date'),
+                'bedrooms': listing.get('bedrooms'),
+                'bathrooms': listing.get('bathrooms'),
+                'car_spaces': listing.get('car_spaces'),
+                'address_normalised': listing['address_normalised'],
+                'listing_url': listing.get('listing_url', ''),
+                'source_site': listing.get('source_site', ''),
+                'status': status,
+                'raw_json': json.dumps(listing),
+            })
 
-        results = []
-        for raw in listings:
-            parsed = parse_sold_listing(raw)
-            if parsed and parsed['property_type'] == property_type:
-                results.append(parsed)
-
-        logger.info(f"Fetched {len(results)} sold {property_type}s in {suburb} from Domain")
-        return results
-
-    except requests.RequestException as e:
-        logger.error(f"Domain sold listings request failed: {e}")
-        return []
-    except (ValueError, KeyError) as e:
-        logger.error(f"Failed to parse Domain sold listings response: {e}")
-        return []
+        logger.info(f"Fetched {len(google_results)} sold {property_type}s in {suburb} from Google search")
     except Exception as e:
-        logger.error(f"Unexpected error fetching Domain sold listings: {e}")
-        return []
+        logger.error(f"Google search failed: {e}")
+
+    # Bonus source: Domain API (if api_key provided)
+    if api_key:
+        try:
+            params = build_sold_search_params(suburb, property_type, postcode)
+
+            headers = {
+                'X-Api-Key': api_key,
+                'Accept': 'application/json',
+            }
+
+            time.sleep(RATE_LIMIT_DELAY)
+
+            url = f"{DOMAIN_API_BASE}/salesResults/{suburb}"
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+
+            if response.status_code == 200:
+                listings = response.json()
+                if not isinstance(listings, list):
+                    listings = listings.get('listings', [])
+
+                for raw in listings:
+                    parsed = parse_sold_listing(raw)
+                    if parsed and parsed['property_type'] == property_type:
+                        results.append(parsed)
+
+                logger.info(f"Fetched {len(listings)} sold {property_type}s in {suburb} from Domain API (bonus)")
+            else:
+                logger.warning(f"Domain API returned {response.status_code} for {suburb}")
+
+        except requests.RequestException as e:
+            logger.error(f"Domain API request failed: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error with Domain API: {e}")
+
+    return results

@@ -248,6 +248,9 @@ class TestProvisionalSalesTable:
             'bathrooms': None,
             'car_spaces': None,
             'address_normalised': '9|27-29|morton st|wollstonecraft|2065',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
             'raw_json': '{"test": true}',
         }])
         assert inserted == 1
@@ -269,6 +272,9 @@ class TestProvisionalSalesTable:
             'bathrooms': None,
             'car_spaces': None,
             'address_normalised': '9|27-29|morton st|wollstonecraft|2065',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
             'raw_json': '{}',
         }
         db.upsert_provisional_sales([sale])
@@ -292,6 +298,9 @@ class TestProvisionalSalesTable:
             'bathrooms': None,
             'car_spaces': None,
             'address_normalised': '|10|smith st|wollstonecraft|2065',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
             'raw_json': '{}',
         }])
         results = db.get_unconfirmed_provisional_sales()
@@ -316,6 +325,9 @@ class TestProvisionalSalesTable:
             'bathrooms': None,
             'car_spaces': None,
             'address_normalised': '|10|smith st|wollstonecraft|2065',
+            'listing_url': None,
+            'source_site': None,
+            'status': 'unconfirmed',
             'raw_json': '{}',
         }])
         db.mark_provisional_confirmed('domain-222', 'AU123456')
@@ -340,6 +352,9 @@ class TestProvisionalSalesTable:
                 'bathrooms': None,
                 'car_spaces': None,
                 'address_normalised': '9|27|morton st|wollstonecraft|2065',
+                'listing_url': None,
+                'source_site': None,
+                'status': 'unconfirmed',
                 'raw_json': '{}',
             },
             {
@@ -357,6 +372,9 @@ class TestProvisionalSalesTable:
                 'bathrooms': None,
                 'car_spaces': None,
                 'address_normalised': '|5|smith st|revesby|2212',
+                'listing_url': None,
+                'source_site': None,
+                'status': 'unconfirmed',
                 'raw_json': '{}',
             },
         ])
