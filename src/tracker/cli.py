@@ -1172,7 +1172,7 @@ def review_buttons(ctx, segment, limit, dry_run):
 
     for i in range(0, len(sales_list), chunk_size):
         chunk = sales_list[i:i + chunk_size]
-        success = send_review_digest(config, seg.display_name, chunk, segment)
+        success = send_review_digest(telegram_config, seg.display_name, chunk, segment)
 
         if success:
             # Mark all sales in this chunk as sent
