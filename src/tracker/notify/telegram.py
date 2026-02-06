@@ -36,25 +36,32 @@ class TelegramConfig:
 
     bot_token: str
     chat_id: str
+    report_chat_id: Optional[str] = None  # Separate chat ID for reports (e.g., group chat)
 
     @classmethod
     def from_env(cls) -> 'TelegramConfig':
         """Load config from environment variables."""
         token = os.getenv('TELEGRAM_BOT_TOKEN')
         chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        report_chat_id = os.getenv('TELEGRAM_REPORT_CHAT_ID')
 
         if not token or not chat_id:
             raise ValueError(
                 "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set"
             )
 
-        return cls(bot_token=token, chat_id=chat_id)
+        return cls(bot_token=token, chat_id=chat_id, report_chat_id=report_chat_id)
+
+    def get_report_chat_id(self) -> str:
+        """Get chat ID for reports (uses report_chat_id if set, else chat_id)."""
+        return self.report_chat_id or self.chat_id
 
 
 def send_message(
     config: TelegramConfig,
     message: str,
     parse_mode: str = 'HTML',
+    use_report_chat: bool = False,
 ) -> bool:
     """
     Send a message via Telegram bot.
@@ -63,14 +70,17 @@ def send_message(
         config: Telegram configuration
         message: Message text (HTML or plain)
         parse_mode: 'HTML' or 'MarkdownV2'
+        use_report_chat: If True, send to report_chat_id (for shared reports)
 
     Returns:
         True if successful, False otherwise
     """
     url = f"{TELEGRAM_API_BASE}{config.bot_token}/sendMessage"
 
+    chat_id = config.get_report_chat_id() if use_report_chat else config.chat_id
+
     payload = {
-        'chat_id': config.chat_id,
+        'chat_id': chat_id,
         'text': message,
         'parse_mode': parse_mode,
         'disable_web_page_preview': True,
@@ -82,6 +92,134 @@ def send_message(
         return True
     except requests.RequestException as e:
         logger.error(f"Failed to send Telegram message: {e}")
+        return False
+
+
+def send_review_with_buttons(
+    config: TelegramConfig,
+    sale_id: str,
+    address: str,
+    price: int,
+    area_sqm: Optional[float],
+    zoning: Optional[str],
+    year_built: Optional[int],
+    segment_code: str,
+) -> bool:
+    """
+    Send a review request with inline Yes/No buttons.
+
+    Args:
+        config: Telegram configuration
+        sale_id: Unique sale identifier (dealing_number)
+        address: Property address
+        price: Sale price
+        area_sqm: Land area in sqm
+        zoning: Zoning code
+        year_built: Year property was built
+        segment_code: Segment being reviewed
+
+    Returns:
+        True if successful
+    """
+    from tracker.compute.equity import format_currency
+
+    url = f"{TELEGRAM_API_BASE}{config.bot_token}/sendMessage"
+
+    # Format message
+    area_str = f"{area_sqm:.0f}sqm" if area_sqm else "N/A"
+    zoning_str = zoning or "Unknown"
+    year_str = f"Built {year_built}" if year_built else "Year unknown"
+
+    message = (
+        f"<b>{address}</b>\n"
+        f"{format_currency(price)} | {area_str}\n"
+        f"{zoning_str} | {year_str}\n\n"
+        f"Is this comparable to your property?"
+    )
+
+    # Inline keyboard with Yes/No buttons
+    # callback_data format: "review:SEGMENT:SALE_ID:yes" or "review:SEGMENT:SALE_ID:no"
+    keyboard = {
+        "inline_keyboard": [[
+            {"text": "Yes", "callback_data": f"review:{segment_code}:{sale_id}:yes"},
+            {"text": "No", "callback_data": f"review:{segment_code}:{sale_id}:no"},
+        ]]
+    }
+
+    payload = {
+        'chat_id': config.chat_id,  # Reviews go to personal chat, not group
+        'text': message,
+        'parse_mode': 'HTML',
+        'reply_markup': keyboard,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Failed to send review message: {e}")
+        return False
+
+
+def get_callback_updates(config: TelegramConfig, offset: Optional[int] = None) -> List[dict]:
+    """
+    Poll for callback query updates from button presses.
+
+    Args:
+        config: Telegram configuration
+        offset: Update offset (to avoid getting same updates again)
+
+    Returns:
+        List of callback query updates
+    """
+    url = f"{TELEGRAM_API_BASE}{config.bot_token}/getUpdates"
+
+    params = {
+        'allowed_updates': ['callback_query'],
+        'timeout': 5,
+    }
+    if offset is not None:
+        params['offset'] = offset
+
+    try:
+        response = requests.get(url, params=params, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get('ok'):
+            return data.get('result', [])
+        return []
+    except requests.RequestException as e:
+        logger.error(f"Failed to get updates: {e}")
+        return []
+
+
+def answer_callback_query(config: TelegramConfig, callback_query_id: str, text: str = "") -> bool:
+    """
+    Acknowledge a callback query (required by Telegram).
+
+    Args:
+        config: Telegram configuration
+        callback_query_id: ID of the callback query to answer
+        text: Optional notification text to show user
+
+    Returns:
+        True if successful
+    """
+    url = f"{TELEGRAM_API_BASE}{config.bot_token}/answerCallbackQuery"
+
+    payload = {
+        'callback_query_id': callback_query_id,
+        'text': text,
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Failed to answer callback: {e}")
         return False
 
 
@@ -409,9 +547,9 @@ def send_monthly_report(
     period: str,
     app_config: Optional[dict] = None,
 ) -> bool:
-    """Send the report via Telegram."""
+    """Send the report via Telegram (to report chat if configured)."""
     message = format_monthly_report(metrics, gap_tracker, affordability, period, app_config)
-    return send_message(config, message)
+    return send_message(config, message, use_report_chat=True)
 
 
 def send_alert(
@@ -472,6 +610,7 @@ class SegmentPosition:
     debt: int
     equity_or_net: Optional[int]  # Usable equity (IP) or net proceeds (PPOR)
     is_ppor: bool  # True = PPOR (net after sale), False = IP (usable equity)
+    target_80_lvr: Optional[int] = None  # Target value for 80% LVR (IP only)
 
 
 def compute_segment_position(
@@ -487,8 +626,10 @@ def compute_segment_position(
 
     For PPOR: net = (value * haircut - selling_costs) - debt
     For IP: equity = (value * haircut * lvr_cap) - debt
+         target_80_lvr = debt / lvr_cap (property value needed for 80% LVR)
     """
     equity_or_net = None
+    target_80_lvr = None
 
     if metric.median_price:
         if is_ppor:
@@ -500,6 +641,8 @@ def compute_segment_position(
             # IP: Usable equity at 80% LVR
             gross = metric.median_price * haircut * lvr_cap
             equity_or_net = int(gross - debt)
+            # Target value needed for 80% LVR (when usable equity becomes positive)
+            target_80_lvr = int(debt / lvr_cap)
 
     return SegmentPosition(
         segment_code=metric.segment,
@@ -508,6 +651,7 @@ def compute_segment_position(
         debt=debt,
         equity_or_net=equity_or_net,
         is_ppor=is_ppor,
+        target_80_lvr=target_80_lvr,
     )
 
 
@@ -516,6 +660,7 @@ def format_simple_report(
     positions: Dict[str, SegmentPosition],  # segment_code -> SegmentPosition
     period: str,
     config: Optional[dict] = None,
+    provisional_sales: Optional[List[dict]] = None,
 ) -> str:
     """
     Format a simplified weekly report.
@@ -590,9 +735,39 @@ def format_simple_report(
             label = "net" if pos.is_ppor else "usable equity"
             # Shorten display name for position line
             short_name = pos.display_name.split(' (')[0]
-            lines.append(f"{short_name}: {median_str} median -> ~{equity_str} {label}")
+            line = f"{short_name}: {median_str} median -> ~{equity_str} {label}"
+            # Show 80% LVR target for IP when usable equity is negative
+            if not pos.is_ppor and pos.equity_or_net < 0 and pos.target_80_lvr:
+                target_str = format_currency(pos.target_80_lvr)
+                line += f" (target: {target_str} for 80% LVR)"
+            lines.append(line)
         else:
             lines.append(f"{pos.display_name}: {median_str} median")
+
+    # Section 3: Recent Unconfirmed Sales (Domain)
+    if provisional_sales:
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("<b>Recent Unconfirmed Sales (Domain)</b>")
+        for sale in provisional_sales:
+            unit = sale.get('unit_number', '')
+            house = sale.get('house_number', '')
+            street = sale.get('street_name', '')
+            suburb = sale.get('suburb', '')
+            price = sale.get('sold_price', 0)
+            sold_date = sale.get('sold_date', '')
+
+            addr_parts = []
+            if unit:
+                addr_parts.append(f"{unit}/")
+            if house:
+                addr_parts.append(f"{house} ")
+            addr_parts.append(f"{street}, {suburb}")
+            address = "".join(addr_parts)
+
+            lines.append(f"  {sold_date}: {address} - {format_currency(price)}")
+        lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
 
     return "\n".join(lines)
 
@@ -603,7 +778,8 @@ def send_simple_report(
     positions: Dict[str, SegmentPosition],
     period: str,
     app_config: Optional[dict] = None,
+    provisional_sales: Optional[List[dict]] = None,
 ) -> bool:
-    """Send the simplified report via Telegram."""
-    message = format_simple_report(new_sales, positions, period, app_config)
-    return send_message(config, message)
+    """Send the simplified report via Telegram (to report chat if configured)."""
+    message = format_simple_report(new_sales, positions, period, app_config, provisional_sales)
+    return send_message(config, message, use_report_chat=True)

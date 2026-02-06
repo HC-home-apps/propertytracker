@@ -404,3 +404,41 @@ class TestFormatAlert:
         """Format error alert."""
         alert = format_alert("Error", "Something broke", severity='error')
         assert "Error" in alert
+
+
+class TestProvisionalSalesInReport:
+    """Test provisional sales section in report."""
+
+    def test_includes_unconfirmed_sales_section(self):
+        from tracker.notify.telegram import format_simple_report
+        provisional = [
+            {
+                'unit_number': '9',
+                'house_number': '27-29',
+                'street_name': 'Morton St',
+                'suburb': 'Wollstonecraft',
+                'sold_price': 1200000,
+                'sold_date': '2026-02-03',
+                'property_type': 'unit',
+            },
+        ]
+        report = format_simple_report(
+            new_sales={},
+            positions={},
+            period='Feb 6, 2026',
+            config={'report': {'show_proxies': []}},
+            provisional_sales=provisional,
+        )
+        assert 'Recent Unconfirmed' in report
+        assert 'Morton St' in report
+
+    def test_no_section_when_empty(self):
+        from tracker.notify.telegram import format_simple_report
+        report = format_simple_report(
+            new_sales={},
+            positions={},
+            period='Feb 6, 2026',
+            config={'report': {'show_proxies': []}},
+            provisional_sales=[],
+        )
+        assert 'Recent Unconfirmed' not in report
