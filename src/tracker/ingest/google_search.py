@@ -28,6 +28,9 @@ DOMAIN_PRIORITY = {
 
 DDG_SEARCH_URL = 'https://html.duckduckgo.com/html/'
 
+# Track requests within a session to progressively increase delays
+_ddg_request_count = 0
+
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -44,25 +47,21 @@ def build_search_query(
 ) -> str:
     """Build a search query string for sold properties on domain.com.au.
 
+    Keep query broad — bed/bath filters narrow DDG results too aggressively
+    and miss listings that don't have exact text in their title.
+    Post-fetch filtering handles bed/bath constraints instead.
+
     Args:
         suburb: Suburb name (e.g. 'Wollstonecraft')
         property_type: 'house' or 'unit'
-        bedrooms: Optional bedroom count filter
-        bathrooms: Optional bathroom count filter
+        bedrooms: Ignored (kept for API compatibility)
+        bathrooms: Ignored (kept for API compatibility)
 
     Returns:
         Search query string
     """
     type_label = 'apartment' if property_type == 'unit' else 'house'
-
-    parts = ['site:domain.com.au', 'sold', suburb]
-    if bedrooms is not None:
-        parts.append(f'{bedrooms} bed')
-    if bathrooms is not None:
-        parts.append(f'{bathrooms} bath')
-    parts.append(type_label)
-
-    return ' '.join(parts)
+    return f'site:domain.com.au sold {suburb} {type_label}'
 
 
 def parse_search_results_html(html: str) -> List[dict]:
@@ -427,11 +426,17 @@ def fetch_sold_listings_google(
         List of parsed and deduplicated listing dicts
     """
     try:
+        global _ddg_request_count
+        _ddg_request_count += 1
+
         query = build_search_query(suburb, property_type, bedrooms, bathrooms)
         logger.info(f"DuckDuckGo search query: {query}")
 
-        # Rate limiting: random delay between 8-15 seconds to avoid DDG 202 CAPTCHA
-        delay = random.uniform(8.0, 15.0)
+        # Progressive rate limiting: increase delay for successive requests
+        # to avoid DDG 202 CAPTCHA on 3rd+ request in a session
+        base_delay = 8.0 + (_ddg_request_count - 1) * 15.0  # 8s, 23s, 38s, ...
+        delay = random.uniform(base_delay, base_delay + 7.0)
+        logger.info(f"DDG rate limit delay: {delay:.0f}s (request #{_ddg_request_count})")
         time.sleep(delay)
 
         headers = {

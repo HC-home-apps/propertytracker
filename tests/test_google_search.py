@@ -51,16 +51,18 @@ class TestBuildSearchQuery:
         assert query == 'site:domain.com.au sold Revesby house'
 
     def test_unit_query_with_beds_and_baths(self):
+        """Bed/bath params are accepted but ignored in query (filtered post-fetch)."""
         query = build_search_query('Wollstonecraft', 'unit', bedrooms=2, bathrooms=1)
-        assert query == 'site:domain.com.au sold Wollstonecraft 2 bed 1 bath apartment'
+        assert query == 'site:domain.com.au sold Wollstonecraft apartment'
 
     def test_unit_query_without_filters(self):
         query = build_search_query('Lane Cove', 'unit')
         assert query == 'site:domain.com.au sold Lane Cove apartment'
 
     def test_house_query_with_beds_only(self):
+        """Bed param is accepted but ignored in query (filtered post-fetch)."""
         query = build_search_query('Chatswood', 'house', bedrooms=3)
-        assert query == 'site:domain.com.au sold Chatswood 3 bed house'
+        assert query == 'site:domain.com.au sold Chatswood house'
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +607,7 @@ class TestFetchSoldListingsGoogle:
 
         call_kwargs = mock_post.call_args
         data = call_kwargs.kwargs.get('data') or call_kwargs[1].get('data')
-        assert data['q'] == 'site:domain.com.au sold Wollstonecraft 2 bed 1 bath apartment'
+        assert data['q'] == 'site:domain.com.au sold Wollstonecraft apartment'
 
     @patch('tracker.ingest.google_search.time.sleep')
     @patch('tracker.ingest.google_search.requests.post')
