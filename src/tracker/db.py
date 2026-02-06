@@ -247,6 +247,7 @@ class Database:
                 reviewed_at TIMESTAMP,
                 review_sent_at TIMESTAMP,
                 review_notes TEXT,
+                listing_url TEXT,
                 use_in_median BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -281,8 +282,10 @@ class Database:
                 address_normalised TEXT,
                 matched_dealing_number TEXT,
                 status TEXT DEFAULT 'unconfirmed'
-                    CHECK(status IN ('unconfirmed', 'confirmed', 'superseded')),
+                    CHECK(status IN ('unconfirmed', 'confirmed', 'superseded', 'price_withheld')),
                 raw_json TEXT,
+                listing_url TEXT,
+                source_site TEXT,
                 ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -309,12 +312,22 @@ class Database:
         if 'review_sent_at' not in sc_columns:
             conn.execute("ALTER TABLE sale_classifications ADD COLUMN review_sent_at TIMESTAMP")
 
+        # Migrate sale_classifications: add listing_url
+        if 'listing_url' not in sc_columns:
+            conn.execute("ALTER TABLE sale_classifications ADD COLUMN listing_url TEXT")
+
         # Migrate provisional_sales: add bedrooms, bathrooms, car_spaces
         cursor = conn.execute("PRAGMA table_info(provisional_sales)")
         ps_columns = {row[1] for row in cursor.fetchall()}
         for col in ['bedrooms', 'bathrooms', 'car_spaces']:
             if col not in ps_columns:
                 conn.execute(f"ALTER TABLE provisional_sales ADD COLUMN {col} INTEGER")
+
+        # Migrate provisional_sales: add listing_url, source_site
+        if 'listing_url' not in ps_columns:
+            conn.execute("ALTER TABLE provisional_sales ADD COLUMN listing_url TEXT")
+        if 'source_site' not in ps_columns:
+            conn.execute("ALTER TABLE provisional_sales ADD COLUMN source_site TEXT")
 
         conn.commit()
 
