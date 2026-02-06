@@ -540,12 +540,12 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
         if not seg:
             continue
         for suburb in seg.suburbs:
+            # Only filter by suburb + property_type for report display.
+            # Skip bed/bath/car filters — DDG-scraped records often have
+            # NULL for these fields and the user can eyeball them.
             segment_provisional = db.get_unconfirmed_provisional_sales_filtered(
                 suburb=suburb,
                 property_type=seg.property_type,
-                bedrooms=seg.bedrooms,
-                bathrooms=seg.bathrooms,
-                car_spaces=seg.car_spaces,
             )
             if segment_code not in provisional_by_segment:
                 provisional_by_segment[segment_code] = []
