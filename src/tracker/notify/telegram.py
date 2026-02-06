@@ -842,8 +842,20 @@ def _format_provisional_address(sale: dict) -> str:
         addr_parts.append(f"{unit}/")
     if house:
         addr_parts.append(f"{house} ")
-    addr_parts.append(f"{street}, {suburb}")
+    addr_parts.append(f"{street}, {suburb.title()}")
     return "".join(addr_parts)
+
+
+def _format_sold_date(date_str: str) -> str:
+    """Format ISO date string (2026-01-30) to human-readable (30 Jan 2026)."""
+    if not date_str:
+        return ''
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(date_str[:10], '%Y-%m-%d')
+        return dt.strftime('%-d %b %Y')
+    except (ValueError, TypeError):
+        return date_str
 
 
 def _format_bed_bath_car(sale: dict) -> str:
@@ -952,10 +964,21 @@ def format_simple_report(
             lines.append(f"{pos.display_name}: {median_str} median")
 
     # Section 3: Recent Unconfirmed Sales (Domain)
+    # Filter: skip entries with no price, and only show last 6 months
+    from datetime import datetime, timedelta
+    _cutoff = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+
+    def _filter_provisional(sales_list):
+        """Filter provisional sales: must have price, within last 6 months."""
+        return [
+            s for s in sales_list
+            if s.get('sold_price') and (s.get('sold_date', '') >= _cutoff)
+        ]
+
     has_provisional = False
     if provisional_by_segment:
         for seg_code, sales in provisional_by_segment.items():
-            if sales:
+            if _filter_provisional(sales):
                 has_provisional = True
                 break
 
@@ -963,17 +986,18 @@ def format_simple_report(
         lines.append("")
         lines.append("---")
         lines.append("")
-        lines.append("<b>Recent Unconfirmed Sales (Domain)</b>")
+        lines.append("<b>Recent Unconfirmed Sales</b>")
         for seg_code, sales in provisional_by_segment.items():
-            if not sales:
+            filtered = _filter_provisional(sales)
+            if not filtered:
                 continue
             seg = get_segment(seg_code)
             seg_name = seg.display_name if seg else seg_code
             lines.append(f"\n<b>{seg_name}</b>")
-            for sale in sales:
+            for sale in filtered:
                 address = _format_provisional_address(sale)
                 price = sale.get('sold_price', 0)
-                sold_date = sale.get('sold_date', '')
+                sold_date = _format_sold_date(sale.get('sold_date', ''))
                 bed_info = _format_bed_bath_car(sale)
                 listing_url = sale.get('listing_url', '')
                 addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
@@ -984,17 +1008,19 @@ def format_simple_report(
         lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
     elif provisional_sales:
         # Fallback: flat list (backward compatible)
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-        lines.append("<b>Recent Unconfirmed Sales (Domain)</b>")
-        for sale in provisional_sales:
-            address = _format_provisional_address(sale)
-            price = sale.get('sold_price', 0)
-            sold_date = sale.get('sold_date', '')
-            listing_url = sale.get('listing_url', '')
-            addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
-            lines.append(f"  {sold_date}: {addr_display} - {format_currency(price)}")
+        filtered_flat = _filter_provisional(provisional_sales)
+        if filtered_flat:
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+            lines.append("<b>Recent Unconfirmed Sales</b>")
+            for sale in filtered_flat:
+                address = _format_provisional_address(sale)
+                price = sale.get('sold_price', 0)
+                sold_date = _format_sold_date(sale.get('sold_date', ''))
+                listing_url = sale.get('listing_url', '')
+                addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
+                lines.append(f"  {sold_date}: {addr_display} - {format_currency(price)}")
         lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
 
     return "\n".join(lines)
