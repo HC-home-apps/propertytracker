@@ -287,6 +287,11 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
     total_ingested = 0
 
     with Database(config.get('database', {}).get('path', ctx.obj['db_path'])) as db:
+        # Clean up bad records from previous runs
+        cleaned = db.cleanup_provisional_sales()
+        if cleaned:
+            click.echo(f"Cleaned up {cleaned} bad provisional records")
+
         for seg_code, seg in segments_to_process:
             click.echo(f"Ingesting {seg.display_name}...")
 
@@ -523,6 +528,9 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
             lvr_cap=lvr_cap,
             selling_cost_rate=selling_cost_rate,
         )
+
+    # Clean up bad provisional records before displaying
+    db.cleanup_provisional_sales()
 
     # Fetch unconfirmed provisional sales for report, filtered by segment
     provisional_by_segment = {}

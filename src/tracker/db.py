@@ -517,6 +517,62 @@ class Database:
             (dealing_number, provisional_id)
         )
 
+    def cleanup_provisional_sales(self) -> int:
+        """Remove bad records from provisional_sales.
+
+        Deletes records that are:
+        - Missing both house_number and unit_number (unparseable addresses)
+        - Aggregate page titles stored as street names
+        - Unparsed title text (containing 'NSW' or 'sold in')
+        - Duplicate address_normalised (keeps most recent by sold_date)
+
+        Returns:
+            Total number of records deleted.
+        """
+        total = 0
+
+        # 1. Remove records with no address (NULL/empty house_number AND unit_number)
+        total += self.execute("""
+            DELETE FROM provisional_sales
+            WHERE (house_number IS NULL OR house_number = '')
+              AND (unit_number IS NULL OR unit_number = '')
+        """)
+
+        # 2. Remove aggregate page titles stored as street names
+        total += self.execute("""
+            DELETE FROM provisional_sales
+            WHERE street_name LIKE '%Properties sold in%'
+               OR street_name LIKE '%Houses sold in%'
+               OR street_name LIKE '%Townhouses sold in%'
+               OR street_name LIKE '%Apartments sold in%'
+               OR street_name LIKE '%Units sold in%'
+        """)
+
+        # 3. Remove records with unparsed title text in address fields
+        total += self.execute("""
+            DELETE FROM provisional_sales
+            WHERE street_name LIKE '% NSW %'
+               OR street_name LIKE '%on __ ___ 20__%'
+               OR LENGTH(street_name) > 80
+        """)
+
+        # 4. Remove duplicates (keep the one with the latest sold_date per address)
+        total += self.execute("""
+            DELETE FROM provisional_sales
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM provisional_sales
+                GROUP BY address_normalised
+            )
+        """)
+
+        if total > 0:
+            import logging
+            logging.getLogger(__name__).info(
+                f"Cleaned up {total} bad provisional_sales records"
+            )
+
+        return total
+
     def get_unconfirmed_provisional_sales_filtered(
         self,
         suburb: str = None,

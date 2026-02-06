@@ -381,3 +381,96 @@ class TestProvisionalSalesTable:
         results = db.get_unconfirmed_provisional_sales(suburb='Wollstonecraft')
         assert len(results) == 1
         assert results[0]['suburb'] == 'Wollstonecraft'
+
+
+class TestCleanupProvisionalSales:
+    """Test cleanup_provisional_sales removes bad records."""
+
+    def _make_sale(self, id, house_number='5', street_name='Smith St',
+                   unit_number=None, suburb='Revesby', addr_norm=None):
+        return {
+            'id': id,
+            'source': 'google',
+            'unit_number': unit_number,
+            'house_number': house_number,
+            'street_name': street_name,
+            'suburb': suburb,
+            'postcode': '2212',
+            'property_type': 'house',
+            'sold_price': 1000000,
+            'sold_date': '2026-01-15',
+            'bedrooms': None,
+            'bathrooms': None,
+            'car_spaces': None,
+            'address_normalised': addr_norm or f'|{house_number}|{street_name.lower()}|{suburb.lower()}|2212',
+            'listing_url': '',
+            'source_site': '',
+            'status': 'unconfirmed',
+            'raw_json': '{}',
+        }
+
+    def test_removes_no_address_records(self, db):
+        """Should remove records with no house_number and no unit_number."""
+        db.upsert_provisional_sales([
+            self._make_sale('google-good', house_number='10'),
+            self._make_sale('google-bad', house_number=None, addr_norm='||smith st|revesby|2212'),
+            self._make_sale('google-bad2', house_number='', addr_norm='||jones st|revesby|2212'),
+        ])
+        deleted = db.cleanup_provisional_sales()
+        assert deleted >= 2
+        remaining = db.query("SELECT id FROM provisional_sales")
+        ids = [r['id'] for r in remaining]
+        assert 'google-good' in ids
+        assert 'google-bad' not in ids
+        assert 'google-bad2' not in ids
+
+    def test_removes_aggregate_titles(self, db):
+        """Should remove records with aggregate page titles as street names."""
+        db.upsert_provisional_sales([
+            self._make_sale('google-good', street_name='Smith St'),
+            self._make_sale('google-agg1', street_name='19824 Properties sold in Revesby'),
+            self._make_sale('google-agg2', street_name='12063 Houses sold in Revesby'),
+        ])
+        deleted = db.cleanup_provisional_sales()
+        assert deleted >= 2
+        remaining = db.query("SELECT id FROM provisional_sales")
+        ids = [r['id'] for r in remaining]
+        assert 'google-good' in ids
+        assert 'google-agg1' not in ids
+
+    def test_removes_unparsed_title_text(self, db):
+        """Should remove records with NSW or long text in street_name."""
+        db.upsert_provisional_sales([
+            self._make_sale('google-good', street_name='Smith St'),
+            self._make_sale('google-nsw', street_name='32 Beaconsfield Street, Revesby NSW 2212 on 30 Jan 2026'),
+        ])
+        deleted = db.cleanup_provisional_sales()
+        assert deleted >= 1
+        remaining = db.query("SELECT id FROM provisional_sales")
+        ids = [r['id'] for r in remaining]
+        assert 'google-good' in ids
+        assert 'google-nsw' not in ids
+
+    def test_removes_duplicates_keeps_one(self, db):
+        """Should deduplicate by address_normalised, keeping one."""
+        db.upsert_provisional_sales([
+            self._make_sale('google-dup1', addr_norm='|5|smith st|revesby|2212'),
+            self._make_sale('google-dup2', addr_norm='|5|smith st|revesby|2212'),
+        ])
+        deleted = db.cleanup_provisional_sales()
+        assert deleted >= 1
+        remaining = db.query("SELECT id FROM provisional_sales")
+        assert len(remaining) == 1
+
+    def test_keeps_valid_records(self, db):
+        """Should not delete valid records."""
+        db.upsert_provisional_sales([
+            self._make_sale('google-valid1', house_number='10', street_name='Smith St',
+                           addr_norm='|10|smith st|revesby|2212'),
+            self._make_sale('google-valid2', house_number='15', street_name='Jones Ave',
+                           addr_norm='|15|jones ave|revesby|2212'),
+        ])
+        deleted = db.cleanup_provisional_sales()
+        assert deleted == 0
+        remaining = db.query("SELECT id FROM provisional_sales")
+        assert len(remaining) == 2
