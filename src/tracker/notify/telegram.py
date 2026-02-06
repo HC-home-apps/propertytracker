@@ -90,6 +90,16 @@ def send_message(
         response = requests.post(url, json=payload, timeout=30)
         if response.status_code != 200:
             logger.error(f"Telegram API error {response.status_code}: {response.text}")
+
+            # Fallback: if report chat fails, try the personal chat
+            if use_report_chat and config.report_chat_id and chat_id != config.chat_id:
+                logger.info("Falling back to personal chat for report delivery")
+                payload['chat_id'] = config.chat_id
+                fallback = requests.post(url, json=payload, timeout=30)
+                if fallback.status_code == 200:
+                    return True
+                logger.error(f"Fallback also failed: {fallback.status_code}: {fallback.text}")
+
         response.raise_for_status()
         return True
     except requests.RequestException as e:
