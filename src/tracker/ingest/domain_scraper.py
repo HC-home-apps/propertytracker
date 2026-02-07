@@ -1,14 +1,18 @@
 # src/tracker/ingest/domain_scraper.py
-"""Scrape Domain.com.au sold listings directly using headless browser.
+"""Scrape Domain.com.au sold listings via server-rendered HTML.
 
-Uses Playwright to render Domain's JS-heavy sold listings page,
-then extracts structured data from the rendered DOM or embedded JSON.
+Domain uses Next.js which embeds listing data in a __NEXT_DATA__ script tag.
+We fetch the raw HTML with requests and extract the JSON — no browser needed.
 """
 
 import json
 import logging
 import re
+import time
 from typing import List, Optional
+
+import requests
+from bs4 import BeautifulSoup
 
 from tracker.ingest.normalise import normalise_address
 
@@ -16,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 PROPERTY_TYPE_MAP = {
     'apartment': 'unit',
+    'apartmentunitflat': 'unit',
     'unit': 'unit',
     'studio': 'unit',
     'house': 'house',
@@ -24,12 +29,23 @@ PROPERTY_TYPE_MAP = {
     'duplex': 'house',
     'terrace': 'house',
     'semi-detached': 'house',
+    'semidetached': 'house',
+}
+
+HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (X11; Linux x86_64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/131.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-AU,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate',
 }
 
 
 def build_sold_listings_url(suburb: str, postcode: str, property_type: str) -> str:
     """Build Domain.com.au sold listings URL for a suburb."""
-    # Ensure postcode is a clean string (DB may return float like 2212.0)
     postcode = str(int(float(postcode))) if postcode else ''
     slug = f"{suburb.lower().replace(' ', '-')}-nsw-{postcode}"
     ptype = 'apartment' if property_type == 'unit' else 'house'
@@ -46,7 +62,6 @@ def _parse_listing_from_card(card_data: dict, suburb: str, postcode: str) -> Opt
     if not address or not price:
         return None
 
-    # Parse address: "9/27-29 Morton Street" or "15 Alliance Avenue"
     unit_number = None
     house_number = None
     street_name = None
@@ -67,7 +82,6 @@ def _parse_listing_from_card(card_data: dict, suburb: str, postcode: str) -> Opt
     if not house_number:
         return None
 
-    # Parse bedrooms/bathrooms/car from card data
     bedrooms = card_data.get('bedrooms')
     bathrooms = card_data.get('bathrooms')
     car_spaces = card_data.get('car_spaces')
@@ -80,7 +94,6 @@ def _parse_listing_from_card(card_data: dict, suburb: str, postcode: str) -> Opt
         postcode=postcode,
     )
 
-    # Generate a stable ID from the address
     addr_hash = abs(hash(address_normalised))
     sale_id = f"domain-scrape-{addr_hash}"
 
@@ -106,135 +119,86 @@ def _parse_listing_from_card(card_data: dict, suburb: str, postcode: str) -> Opt
     }
 
 
-def _extract_listings_from_page(page) -> List[dict]:
-    """Extract listing data from the rendered Domain sold listings page.
+def _extract_next_data(html: str) -> Optional[dict]:
+    """Extract __NEXT_DATA__ JSON from the HTML page."""
+    soup = BeautifulSoup(html, 'html.parser')
+    script = soup.find('script', id='__NEXT_DATA__')
+    if script and script.string:
+        try:
+            return json.loads(script.string)
+        except json.JSONDecodeError:
+            pass
 
-    Tries multiple strategies:
-    1. Look for __NEXT_DATA__ or similar JSON blobs in script tags
-    2. Parse DOM property cards directly
-    """
-    listings = []
+    # Fallback: regex search for the script tag
+    match = re.search(
+        r'<script\s+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        html,
+        re.DOTALL,
+    )
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
 
-    # Strategy 1: Extract from __NEXT_DATA__ (Next.js data)
-    try:
-        next_data = page.evaluate("""
-            () => {
-                const el = document.querySelector('script#__NEXT_DATA__');
-                if (el) return JSON.parse(el.textContent);
-                return null;
-            }
-        """)
-        if next_data:
-            listings = _parse_next_data(next_data)
-            if listings:
-                logger.info(f"Extracted {len(listings)} listings from __NEXT_DATA__")
-                return listings
-    except Exception as e:
-        logger.debug(f"__NEXT_DATA__ extraction failed: {e}")
-
-    # Strategy 2: Parse property cards from DOM
-    try:
-        cards = page.evaluate("""
-            () => {
-                const results = [];
-                // Domain uses data-testid attributes on listing cards
-                const cards = document.querySelectorAll(
-                    '[data-testid*="listing-card"], [class*="listing-result"], li[class*="is-sold"]'
-                );
-                for (const card of cards) {
-                    const data = {};
-
-                    // Address: look for address element
-                    const addrEl = card.querySelector(
-                        '[data-testid*="address"], [class*="address"], h2 a, .listing-result__address'
-                    );
-                    if (addrEl) data.address = addrEl.textContent.trim();
-
-                    // Price
-                    const priceEl = card.querySelector(
-                        '[data-testid*="price"], [class*="price"], .listing-result__price'
-                    );
-                    if (priceEl) data.price_text = priceEl.textContent.trim();
-
-                    // Listing URL
-                    const linkEl = card.querySelector('a[href*="/sold/"]') || card.querySelector('a[href]');
-                    if (linkEl) data.url = linkEl.href;
-
-                    // Features (beds/baths/car)
-                    const featureEls = card.querySelectorAll(
-                        '[data-testid*="property-features"] span, .property-feature'
-                    );
-                    const features = [];
-                    featureEls.forEach(el => features.push(el.textContent.trim()));
-                    data.features = features;
-
-                    if (data.address) results.push(data);
-                }
-                return results;
-            }
-        """)
-
-        for card in cards:
-            listing = _parse_dom_card(card)
-            if listing:
-                listings.append(listing)
-
-        if listings:
-            logger.info(f"Extracted {len(listings)} listings from DOM cards")
-
-    except Exception as e:
-        logger.debug(f"DOM card extraction failed: {e}")
-
-    # Strategy 3: Find any JSON-LD structured data
-    try:
-        json_ld = page.evaluate("""
-            () => {
-                const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-                const data = [];
-                scripts.forEach(s => {
-                    try { data.push(JSON.parse(s.textContent)); } catch(e) {}
-                });
-                return data;
-            }
-        """)
-        for item in json_ld:
-            parsed = _parse_json_ld(item)
-            listings.extend(parsed)
-
-        if listings:
-            logger.info(f"Extracted {len(listings)} from JSON-LD")
-
-    except Exception as e:
-        logger.debug(f"JSON-LD extraction failed: {e}")
-
-    return listings
+    return None
 
 
 def _parse_next_data(data: dict) -> List[dict]:
     """Parse listings from Next.js __NEXT_DATA__ JSON blob."""
     listings = []
     try:
-        # Navigate the Next.js data structure to find listing data
-        # The exact path varies, so try common patterns
         props = data.get('props', {}).get('pageProps', {})
 
-        # Try common patterns for listing data
-        for key in ['listingsMap', 'listings', 'soldListings', 'results', 'data']:
+        # Try common keys for listing data
+        for key in ['listingsMap', 'listings', 'soldListings', 'results',
+                     'data', 'componentProps']:
             items = props.get(key)
             if isinstance(items, list):
                 for item in items:
-                    listings.append(_normalize_next_listing(item))
+                    parsed = _normalize_next_listing(item)
+                    if parsed:
+                        listings.append(parsed)
             elif isinstance(items, dict):
-                # Sometimes listings are in a nested structure
                 for sub_key in ['listings', 'results', 'items']:
                     sub_items = items.get(sub_key)
                     if isinstance(sub_items, list):
                         for item in sub_items:
-                            listings.append(_normalize_next_listing(item))
+                            parsed = _normalize_next_listing(item)
+                            if parsed:
+                                listings.append(parsed)
+
+        # Also try deeply nested structures common in Domain
+        if not listings:
+            listings = _deep_search_listings(props)
+
     except Exception as e:
         logger.debug(f"Failed to parse __NEXT_DATA__: {e}")
 
-    return [l for l in listings if l]
+    return listings
+
+
+def _deep_search_listings(data, depth=0) -> List[dict]:
+    """Recursively search for listing-like objects in nested data."""
+    if depth > 5:
+        return []
+
+    listings = []
+    if isinstance(data, dict):
+        # Check if this dict looks like a listing
+        if 'listingSlug' in data or ('propertyDetails' in data) or \
+           ('saleDetails' in data and 'propertyDetails' in data.get('listing', {})):
+            parsed = _normalize_next_listing(data)
+            if parsed:
+                listings.append(parsed)
+        else:
+            for value in data.values():
+                listings.extend(_deep_search_listings(value, depth + 1))
+    elif isinstance(data, list):
+        for item in data:
+            listings.extend(_deep_search_listings(item, depth + 1))
+
+    return listings
 
 
 def _normalize_next_listing(item: dict) -> Optional[dict]:
@@ -288,55 +252,17 @@ def _normalize_next_listing(item: dict) -> Optional[dict]:
     }
 
 
-def _parse_dom_card(card: dict) -> Optional[dict]:
-    """Parse a single DOM card extract into a listing dict."""
-    address = card.get('address', '')
-    price_text = card.get('price_text', '')
-
-    # Strip suburb/state/postcode from address
-    # e.g. "9/27-29 Morton Street, Wollstonecraft NSW 2065" → "9/27-29 Morton Street"
-    address = re.sub(r',\s*\w[\w\s]*(?:NSW|VIC|QLD)\s*\d{0,4}.*$', '', address).strip()
-
-    # Parse price from text like "Sold for $1,200,000" or "$1.2m"
-    price = None
-    m_match = re.search(r'\$(\d+(?:\.\d+)?)\s*[mM]', price_text)
-    if m_match:
-        price = int(float(m_match.group(1)) * 1_000_000)
-    else:
-        full_match = re.search(r'\$([\d,]+)', price_text)
-        if full_match:
-            try:
-                price = int(full_match.group(1).replace(',', ''))
-            except ValueError:
-                pass
-
-    # Parse features
-    features = card.get('features', [])
-    bedrooms = bathrooms = car_spaces = None
-    for feat in features:
-        bed_m = re.search(r'(\d+)\s*bed', feat, re.IGNORECASE)
-        if bed_m:
-            bedrooms = int(bed_m.group(1))
-        bath_m = re.search(r'(\d+)\s*bath', feat, re.IGNORECASE)
-        if bath_m:
-            bathrooms = int(bath_m.group(1))
-        car_m = re.search(r'(\d+)\s*car', feat, re.IGNORECASE)
-        if car_m:
-            car_spaces = int(car_m.group(1))
-
-    if not address or not price:
-        return None
-
-    return {
-        'address': address,
-        'price': price,
-        'sold_date': '',
-        'url': card.get('url', ''),
-        'bedrooms': bedrooms,
-        'bathrooms': bathrooms,
-        'car_spaces': car_spaces,
-        'property_type': 'other',  # Will be filtered by caller
-    }
+def _extract_json_ld(html: str) -> List[dict]:
+    """Extract JSON-LD structured data from HTML."""
+    listings = []
+    soup = BeautifulSoup(html, 'html.parser')
+    for script in soup.find_all('script', type='application/ld+json'):
+        try:
+            data = json.loads(script.string)
+            listings.extend(_parse_json_ld(data))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return listings
 
 
 def _parse_json_ld(data) -> List[dict]:
@@ -370,7 +296,10 @@ def fetch_sold_listings_scrape(
     property_type: str,
     postcode: str,
 ) -> List[dict]:
-    """Fetch sold listings by scraping Domain.com.au directly with Playwright.
+    """Fetch sold listings by scraping Domain.com.au sold listings page.
+
+    Uses plain HTTP requests to fetch the HTML and extracts listing data
+    from the embedded __NEXT_DATA__ JSON or JSON-LD structured data.
 
     Args:
         suburb: Suburb name
@@ -380,47 +309,46 @@ def fetch_sold_listings_scrape(
     Returns:
         List of parsed provisional sale records.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        logger.warning("Playwright not installed, skipping Domain scrape")
-        return []
-
     url = build_sold_listings_url(suburb, postcode, property_type)
-    logger.info(f"Scraping Domain sold listings: {url}")
+    logger.info(f"Fetching Domain sold listings: {url}")
 
     results = []
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-http2',
-                ],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    'Mozilla/5.0 (X11; Linux x86_64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/131.0.0.0 Safari/537.36'
-                ),
-                viewport={'width': 1280, 'height': 800},
-                ignore_https_errors=True,
-            )
-            page = context.new_page()
+        # Rate limit: 1 second between requests
+        time.sleep(1.0)
 
-            # Navigate — use domcontentloaded since networkidle can hang
-            page.goto(url, wait_until='domcontentloaded', timeout=30000)
+        response = requests.get(url, headers=HEADERS, timeout=30)
 
-            # Wait for dynamic content to render
-            page.wait_for_timeout(5000)
+        if response.status_code != 200:
+            logger.warning(f"Domain returned HTTP {response.status_code} for {suburb}")
+            logger.debug(f"Response: {response.text[:300]}")
+            return []
 
-            # Extract listings
-            raw_listings = _extract_listings_from_page(page)
+        html = response.text
+        logger.info(f"Fetched {len(html)} bytes from Domain for {suburb}")
 
-            browser.close()
+        # Strategy 1: Extract from __NEXT_DATA__
+        raw_listings = []
+        next_data = _extract_next_data(html)
+        if next_data:
+            raw_listings = _parse_next_data(next_data)
+            if raw_listings:
+                logger.info(f"Extracted {len(raw_listings)} listings from __NEXT_DATA__")
+
+        # Strategy 2: JSON-LD fallback
+        if not raw_listings:
+            raw_listings = _extract_json_ld(html)
+            if raw_listings:
+                logger.info(f"Extracted {len(raw_listings)} listings from JSON-LD")
+
+        if not raw_listings:
+            logger.warning(f"No listings found in Domain HTML for {suburb} ({len(html)} bytes)")
+            # Log a snippet of the HTML for debugging
+            if '__NEXT_DATA__' in html:
+                logger.debug("__NEXT_DATA__ tag found but parsing failed")
+            else:
+                logger.debug("No __NEXT_DATA__ tag in HTML")
 
         # Convert to provisional_sales format
         for listing_data in raw_listings:
@@ -428,13 +356,13 @@ def fetch_sold_listings_scrape(
             if parsed and parsed['property_type'] == property_type:
                 results.append(parsed)
             elif parsed and listing_data.get('property_type') == 'other':
-                # If property type couldn't be determined, include it
-                # (caller filtered by property type already via URL param)
                 parsed['property_type'] = property_type
                 results.append(parsed)
 
-        logger.info(f"Scraped {len(results)} sold {property_type}s in {suburb} from Domain")
+        logger.info(f"Domain scrape: {len(results)} sold {property_type}s in {suburb}")
 
+    except requests.RequestException as e:
+        logger.error(f"Domain request failed for {suburb}: {e}")
     except Exception as e:
         logger.error(f"Domain scrape failed for {suburb}: {e}")
 
