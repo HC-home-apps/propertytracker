@@ -52,6 +52,11 @@ def _parse_listing_from_card(card_data: dict, suburb: str, postcode: str) -> Opt
     if not address or not price:
         return None
 
+    # Strip trailing suburb/state/postcode from address
+    # e.g. "32 Beaconsfield Street, REVESBY" → "32 Beaconsfield Street"
+    # or "15 Alliance Ave, Revesby NSW 2212" → "15 Alliance Ave"
+    address = re.split(r',\s*', address)[0].strip()
+
     unit_number = None
     house_number = None
     street_name = None
@@ -393,10 +398,11 @@ def fetch_sold_listings_scrape(
                     }
                 }
 
-                // Extract sold date: "Sold DD Mon YYYY" or "Sold on DD Mon YYYY"
+                // Extract sold date: handles "Sold 30 Jan 2026",
+                // "Sold at auction 30 Jan 2026", "Sold by private treaty 21 Jan 2026", etc.
                 let soldDate = '';
                 const dateMatch = text.match(
-                    /[Ss]old\\s+(?:on\\s+)?(\\d{1,2})\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+(\\d{4})/i
+                    /[Ss]old\\s+.*?(\\d{1,2})\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+(\\d{4})/i
                 );
                 if (dateMatch) {
                     const months = {jan:'01',feb:'02',mar:'03',apr:'04',
