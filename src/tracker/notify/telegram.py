@@ -455,6 +455,19 @@ def edit_message_remove_buttons(
         return False
 
 
+def delete_message(config: TelegramConfig, chat_id: int, message_id: int) -> bool:
+    """Delete a Telegram message entirely."""
+    url = f"{TELEGRAM_API_BASE}{config.bot_token}/deleteMessage"
+    payload = {'chat_id': chat_id, 'message_id': message_id}
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        return True
+    except requests.RequestException as e:
+        logger.error(f"Failed to delete message: {e}")
+        return False
+
+
 def format_metric_line(
     metric: MetricResult,
     include_filter: bool = True,

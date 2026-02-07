@@ -638,13 +638,18 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
 def _send_review_buttons_for_report(db: Database, config: dict, new_sales: dict, dry_run: bool):
     """Send review buttons for unconfirmed sales that appeared in the report.
 
-    This ensures the user sees review buttons for exactly the same sales
-    shown inline in the report, not a separate 30-day trawl.
+    Only sends reviews for proxy segments (Revesby, Wollstonecraft) since
+    these are the segments that feed into median calculations.
     """
     from tracker.compute.segments import SEGMENTS
 
-    # Collect unconfirmed sales by segment
+    report_config = config.get('report', {})
+    proxy_segments = set(report_config.get('show_proxies', []))
+
+    # Only review proxy segments — target segments don't need classification
     for segment_code, sales in new_sales.items():
+        if segment_code not in proxy_segments:
+            continue
         unconfirmed = [s for s in sales if s.source == 'unconfirmed' and s.provisional_id]
         if not unconfirmed:
             continue
@@ -1387,7 +1392,7 @@ def review_poll(ctx):
         TelegramConfig,
         get_callback_updates,
         answer_callback_query,
-        edit_message_remove_buttons,
+        delete_message,
     )
 
     config = load_config(ctx.obj['config_path'])
@@ -1502,25 +1507,12 @@ def review_poll(ctx):
         # Acknowledge callback
         answer_callback_query(telegram_config, callback_id, response_text)
 
-        # Remove buttons from the message and show result
+        # Delete the review message entirely (cleaner than leaving edited text)
         msg = callback.get('message', {})
         chat_id = msg.get('chat', {}).get('id')
         message_id = msg.get('message_id')
-        original_text = msg.get('text', '')
         if chat_id and message_id:
-            verdict = "YES - Comparable" if response == 'yes' else "NO - Not comparable"
-            if sale_id == 'all':
-                # Bulk verdict for digest
-                new_text = original_text + f"\n\n<b>All marked: {verdict}</b>"
-            else:
-                # Single sale verdict
-                new_text = original_text.replace(
-                    "Is this comparable to your property?",
-                    f"<b>{verdict}</b>",
-                )
-            edit_message_remove_buttons(
-                telegram_config, chat_id, message_id, new_text=new_text,
-            )
+            delete_message(telegram_config, chat_id, message_id)
 
     # Clear processed updates by requesting with offset
     if max_update_id is not None:

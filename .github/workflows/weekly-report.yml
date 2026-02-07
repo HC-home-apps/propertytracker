@@ -234,7 +234,16 @@ jobs:
         run: |
           python -m tracker compute
 
-      - name: Step 5 - Send report
+      - name: Step 4b - Process pending review responses
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Process button responses from last week's reviews (deletes old review messages)
+          # Runs before report so old reviews are cleaned up first
+          python -m tracker review-poll || echo "No pending responses"
+
+      - name: Step 5 - Send report and review buttons
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -250,15 +259,6 @@ jobs:
             DRY_RUN_FLAG="--dry-run"
           fi
           python -m tracker notify $DRY_RUN_FLAG
-
-      - name: Step 6a - Process pending review responses
-        if: github.event.inputs.run_enrich != 'false'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          # Process any button responses from previous reviews
-          python -m tracker review-poll || echo "No pending responses"
 
       - name: Save database to cache
         uses: actions/cache/save@v4
