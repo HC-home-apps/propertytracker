@@ -1,17 +1,18 @@
 # src/tracker/ingest/domain_scraper.py
-"""Scrape Domain.com.au sold listings via server-rendered HTML.
+"""Scrape Domain.com.au sold listings via headless Chromium (Playwright).
 
-Domain uses Next.js which embeds listing data in a __NEXT_DATA__ script tag.
-We fetch the raw HTML with requests and extract the JSON — no browser needed.
+Domain blocks plain HTTP requests. We use a real headless browser to load the
+page, then extract listing data from the embedded __NEXT_DATA__ JSON or
+JSON-LD structured data.
 """
 
 import json
 import logging
 import re
 import time
+import hashlib
 from typing import List, Optional
 
-import requests
 from bs4 import BeautifulSoup
 
 from tracker.ingest.normalise import normalise_address
@@ -30,17 +31,6 @@ PROPERTY_TYPE_MAP = {
     'terrace': 'house',
     'semi-detached': 'house',
     'semidetached': 'house',
-}
-
-HEADERS = {
-    'User-Agent': (
-        'Mozilla/5.0 (X11; Linux x86_64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/131.0.0.0 Safari/537.36'
-    ),
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'en-AU,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate',
 }
 
 
@@ -94,8 +84,8 @@ def _parse_listing_from_card(card_data: dict, suburb: str, postcode: str) -> Opt
         postcode=postcode,
     )
 
-    addr_hash = abs(hash(address_normalised))
-    sale_id = f"domain-scrape-{addr_hash}"
+    digest = hashlib.sha256(address_normalised.encode('utf-8')).hexdigest()[:20]
+    sale_id = f"domain-scrape-{digest}"
 
     return {
         'id': sale_id,
@@ -291,15 +281,54 @@ def _parse_json_ld(data) -> List[dict]:
     return listings
 
 
+def _launch_browser():
+    """Launch a stealth headless Chromium browser via Playwright.
+
+    Returns (playwright_instance, browser, page) tuple.
+    Caller must close browser and stop playwright when done.
+    """
+    from playwright.sync_api import sync_playwright
+
+    pw = sync_playwright().start()
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            '--disable-blink-features=AutomationControlled',
+            '--no-sandbox',
+        ],
+    )
+    context = browser.new_context(
+        viewport={'width': 1920, 'height': 1080},
+        user_agent=(
+            'Mozilla/5.0 (X11; Linux x86_64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/131.0.0.0 Safari/537.36'
+        ),
+        locale='en-AU',
+        timezone_id='Australia/Sydney',
+    )
+    page = context.new_page()
+
+    # Hide webdriver flag so Domain doesn't detect automation
+    page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => false });
+        // Remove Playwright-specific properties
+        delete window.__playwright;
+        delete window.__pw_manual;
+    """)
+
+    return pw, browser, page
+
+
 def fetch_sold_listings_scrape(
     suburb: str,
     property_type: str,
     postcode: str,
 ) -> List[dict]:
-    """Fetch sold listings by scraping Domain.com.au sold listings page.
+    """Fetch sold listings by scraping Domain.com.au with headless Chromium.
 
-    Uses plain HTTP requests to fetch the HTML and extracts listing data
-    from the embedded __NEXT_DATA__ JSON or JSON-LD structured data.
+    Uses Playwright to load the page in a real browser, then extracts listing
+    data from __NEXT_DATA__ JSON or page HTML.
 
     Args:
         suburb: Suburb name
@@ -309,46 +338,78 @@ def fetch_sold_listings_scrape(
     Returns:
         List of parsed provisional sale records.
     """
+    try:
+        from playwright.sync_api import sync_playwright  # noqa: F401
+    except ImportError:
+        logger.error(
+            "Playwright not installed. Run: pip install playwright && playwright install chromium"
+        )
+        return []
+
     url = build_sold_listings_url(suburb, postcode, property_type)
-    logger.info(f"Fetching Domain sold listings: {url}")
+    logger.info(f"Scraping Domain sold listings: {url}")
 
     results = []
+    pw = None
+    browser = None
 
     try:
-        # Rate limit: 1 second between requests
-        time.sleep(1.0)
+        # Rate limit between requests
+        time.sleep(2.0)
 
-        response = requests.get(url, headers=HEADERS, timeout=30)
+        pw, browser, page = _launch_browser()
 
-        if response.status_code != 200:
-            logger.warning(f"Domain returned HTTP {response.status_code} for {suburb}")
-            logger.debug(f"Response: {response.text[:300]}")
-            return []
+        # Navigate and wait for content
+        page.goto(url, wait_until='domcontentloaded', timeout=45000)
+        # Give JS a moment to hydrate
+        page.wait_for_timeout(3000)
 
-        html = response.text
-        logger.info(f"Fetched {len(html)} bytes from Domain for {suburb}")
-
-        # Strategy 1: Extract from __NEXT_DATA__
+        # Strategy 1: Extract __NEXT_DATA__ via JS evaluation (fastest)
         raw_listings = []
-        next_data = _extract_next_data(html)
-        if next_data:
-            raw_listings = _parse_next_data(next_data)
-            if raw_listings:
-                logger.info(f"Extracted {len(raw_listings)} listings from __NEXT_DATA__")
+        try:
+            next_data = page.evaluate('() => window.__NEXT_DATA__')
+            if next_data and isinstance(next_data, dict):
+                raw_listings = _parse_next_data(next_data)
+                if raw_listings:
+                    logger.info(
+                        f"Extracted {len(raw_listings)} listings from "
+                        f"__NEXT_DATA__ (JS) for {suburb}"
+                    )
+        except Exception as e:
+            logger.debug(f"JS __NEXT_DATA__ extraction failed: {e}")
 
-        # Strategy 2: JSON-LD fallback
+        # Strategy 2: Parse HTML for __NEXT_DATA__ tag
         if not raw_listings:
-            raw_listings = _extract_json_ld(html)
-            if raw_listings:
-                logger.info(f"Extracted {len(raw_listings)} listings from JSON-LD")
+            html = page.content()
+            logger.info(f"Got {len(html)} bytes of HTML for {suburb}")
 
-        if not raw_listings:
-            logger.warning(f"No listings found in Domain HTML for {suburb} ({len(html)} bytes)")
-            # Log a snippet of the HTML for debugging
-            if '__NEXT_DATA__' in html:
-                logger.debug("__NEXT_DATA__ tag found but parsing failed")
-            else:
-                logger.debug("No __NEXT_DATA__ tag in HTML")
+            next_data = _extract_next_data(html)
+            if next_data:
+                raw_listings = _parse_next_data(next_data)
+                if raw_listings:
+                    logger.info(
+                        f"Extracted {len(raw_listings)} listings from "
+                        f"__NEXT_DATA__ (HTML) for {suburb}"
+                    )
+
+            # Strategy 3: JSON-LD fallback
+            if not raw_listings:
+                raw_listings = _extract_json_ld(html)
+                if raw_listings:
+                    logger.info(
+                        f"Extracted {len(raw_listings)} listings from "
+                        f"JSON-LD for {suburb}"
+                    )
+
+            if not raw_listings:
+                logger.warning(
+                    f"No listings found in Domain page for {suburb} "
+                    f"({len(html)} bytes)"
+                )
+                if '__NEXT_DATA__' in html:
+                    logger.debug("__NEXT_DATA__ tag present but no listings parsed")
+                else:
+                    logger.debug("No __NEXT_DATA__ tag found in HTML")
 
         # Convert to provisional_sales format
         for listing_data in raw_listings:
@@ -361,9 +422,19 @@ def fetch_sold_listings_scrape(
 
         logger.info(f"Domain scrape: {len(results)} sold {property_type}s in {suburb}")
 
-    except requests.RequestException as e:
-        logger.error(f"Domain request failed for {suburb}: {e}")
     except Exception as e:
         logger.error(f"Domain scrape failed for {suburb}: {e}")
+
+    finally:
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
 
     return results

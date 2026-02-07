@@ -48,21 +48,33 @@ def _wrap_results_page(*result_htmls):
 class TestBuildSearchQuery:
     def test_house_query(self):
         query = build_search_query('Revesby', 'house')
-        assert query == 'sold Revesby NSW house site:domain.com.au OR site:realestate.com.au'
+        assert query == (
+            'sold Revesby NSW house '
+            'site:domain.com.au OR site:realestate.com.au OR site:allhomes.com.au'
+        )
 
     def test_unit_query_with_beds_and_baths(self):
         """Bed/bath params are accepted but ignored in query (filtered post-fetch)."""
         query = build_search_query('Wollstonecraft', 'unit', bedrooms=2, bathrooms=1)
-        assert query == 'sold Wollstonecraft NSW apartment site:domain.com.au OR site:realestate.com.au'
+        assert query == (
+            'sold Wollstonecraft NSW apartment '
+            'site:domain.com.au OR site:realestate.com.au OR site:allhomes.com.au'
+        )
 
     def test_unit_query_without_filters(self):
         query = build_search_query('Lane Cove', 'unit')
-        assert query == 'sold Lane Cove NSW apartment site:domain.com.au OR site:realestate.com.au'
+        assert query == (
+            'sold Lane Cove NSW apartment '
+            'site:domain.com.au OR site:realestate.com.au OR site:allhomes.com.au'
+        )
 
     def test_house_query_with_beds_only(self):
         """Bed param is accepted but ignored in query (filtered post-fetch)."""
         query = build_search_query('Chatswood', 'house', bedrooms=3)
-        assert query == 'sold Chatswood NSW house site:domain.com.au OR site:realestate.com.au'
+        assert query == (
+            'sold Chatswood NSW house '
+            'site:domain.com.au OR site:realestate.com.au OR site:allhomes.com.au'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -607,7 +619,10 @@ class TestFetchSoldListingsGoogle:
 
         call_kwargs = mock_post.call_args
         data = call_kwargs.kwargs.get('data') or call_kwargs[1].get('data')
-        assert data['q'] == 'sold Wollstonecraft NSW apartment site:domain.com.au OR site:realestate.com.au'
+        assert data['q'] == (
+            'sold Wollstonecraft NSW apartment '
+            'site:domain.com.au OR site:realestate.com.au OR site:allhomes.com.au'
+        )
 
     @patch('tracker.ingest.google_search.time.sleep')
     @patch('tracker.ingest.google_search.requests.post')

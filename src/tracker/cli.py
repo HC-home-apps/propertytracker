@@ -3,6 +3,7 @@
 
 import logging
 import sys
+import hashlib
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -52,6 +53,12 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+
+def _stable_sale_id(prefix: str, address_normalised: str) -> str:
+    """Build a deterministic ID from normalised address text."""
+    digest = hashlib.sha256(address_normalised.encode('utf-8')).hexdigest()[:20]
+    return f"{prefix}-{digest}"
 
 
 def load_config(config_path: str = 'config.yml') -> dict:
@@ -259,6 +266,66 @@ def ingest_domain(ctx):
         raise click.ClickException(f"Domain ingest failed: {e}")
 
 
+@cli.command('ingest-domain-scrape')
+@click.pass_context
+def ingest_domain_scrape(ctx):
+    """Scrape Domain.com.au sold listings with headless browser (Playwright)."""
+    from tracker.ingest.domain_scraper import fetch_sold_listings_scrape
+
+    config = load_config(ctx.obj['config_path'])
+    init_segments(config)
+
+    db = Database(ctx.obj['db_path'])
+    db.init_schema()
+
+    run_id = db.start_run('ingest-domain-scrape', 'cli')
+    total_inserted = 0
+
+    try:
+        segments_config = config.get('segments', {})
+        for seg_code, seg_def in segments_config.items():
+            suburbs = seg_def.get('suburbs', [])
+            prop_type = seg_def.get('property_type', 'house')
+            for suburb in suburbs:
+                postcode_rows = db.query(
+                    "SELECT DISTINCT postcode FROM raw_sales "
+                    "WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
+                    (suburb,)
+                )
+                postcode = (
+                    str(int(float(postcode_rows[0]['postcode'])))
+                    if postcode_rows else ''
+                )
+
+                click.echo(
+                    f"Scraping Domain sold listings for {suburb} ({prop_type})..."
+                )
+                listings = fetch_sold_listings_scrape(
+                    suburb=suburb.title(),
+                    property_type=prop_type,
+                    postcode=postcode,
+                )
+
+                if listings:
+                    inserted = db.upsert_provisional_sales(listings)
+                    total_inserted += inserted
+                    click.echo(f"  {len(listings)} found, {inserted} new")
+                else:
+                    click.echo(f"  No sold listings found")
+
+        click.echo(
+            f"Total: {total_inserted} new provisional sales from Domain scrape"
+        )
+        db.complete_run(
+            run_id, status='success', records_inserted=total_inserted
+        )
+
+    except Exception as e:
+        logger.exception("Domain scrape ingest failed")
+        db.complete_run(run_id, status='failed', error_message=str(e))
+        raise click.ClickException(f"Domain scrape failed: {e}")
+
+
 @cli.command('ingest-google')
 @click.option('--segment', help='Specific segment to ingest (optional)')
 @click.option('--enrich', is_flag=True, help='Run LLM agent for incomplete data')
@@ -321,8 +388,7 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
                     # Convert to provisional_sales format
                     sales = []
                     for listing in results:
-                        addr_hash = hash(listing['address_normalised'])
-                        sale_id = f"google-{abs(addr_hash)}"
+                        sale_id = _stable_sale_id('google', listing['address_normalised'])
 
                         status = 'price_withheld' if listing.get('price_withheld', False) else 'unconfirmed'
 
@@ -365,6 +431,11 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
 
             except Exception as e:
                 click.echo(f"  DDG {search_suburb}: Error - {e}", err=True)
+
+        # Run cleanup again after ingest to collapse duplicates created in this run.
+        cleaned_post = db.cleanup_provisional_sales()
+        if cleaned_post:
+            click.echo(f"Post-ingest cleanup: removed {cleaned_post} duplicate/bad records")
 
     click.echo(f"\nTotal ingested: {total_ingested} sales")
 
@@ -483,12 +554,16 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
     report_config = config.get('report', {})
     show_proxies = report_config.get('show_proxies', ['revesby_houses', 'wollstonecraft_units'])
 
-    # Get last successful report date (default to 7 days ago)
-    last_run = db.get_last_successful_run('notify')
-    if last_run and last_run.get('completed_at'):
-        last_report_date = datetime.fromisoformat(last_run['completed_at']).date()
-    else:
-        last_report_date = reference_date - timedelta(days=7)
+    # Use schedule-based lookback, not "last notify run".
+    # Manual reruns on the same day should still show the configured window.
+    schedule_cfg = config.get('schedule', {})
+    freq = str(schedule_cfg.get('frequency', 'weekly')).lower()
+    lookback_days = {
+        'weekly': 7,
+        'fortnightly': 14,
+        'monthly': 31,
+    }.get(freq, 7)
+    last_report_date = reference_date - timedelta(days=lookback_days)
 
     click.echo(f"Finding sales since {last_report_date}...")
 

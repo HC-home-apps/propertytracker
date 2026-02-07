@@ -65,7 +65,10 @@ def build_search_query(
         Search query string
     """
     type_label = 'apartment' if property_type == 'unit' else 'house'
-    return f'sold {suburb} NSW {type_label} site:domain.com.au OR site:realestate.com.au'
+    return (
+        f'sold {suburb} NSW {type_label} '
+        'site:domain.com.au OR site:realestate.com.au OR site:allhomes.com.au'
+    )
 
 
 def parse_search_results_html(html: str) -> List[dict]:

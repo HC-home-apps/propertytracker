@@ -548,7 +548,7 @@ class Database:
         - Missing both house_number and unit_number (unparseable addresses)
         - Aggregate page titles stored as street names
         - Unparsed title text (containing 'NSW' or 'sold in')
-        - Duplicate address_normalised (keeps most recent by sold_date)
+        - Duplicate address_normalised (keeps highest-quality row)
 
         Returns:
             Total number of records deleted.
@@ -573,19 +573,48 @@ class Database:
         """)
 
         # 3. Remove records with unparsed title text in address fields
+        #    Be conservative: only delete obvious junk, not partial parses.
+        import logging as _logging
+        _logger = _logging.getLogger(__name__)
+        rule3_count = self.query("""
+            SELECT COUNT(*) AS cnt FROM provisional_sales
+            WHERE street_name LIKE '% NSW 2___%'
+               OR street_name LIKE '%sold on __ ___ 20__%'
+               OR LENGTH(street_name) > 120
+        """)[0]['cnt']
+        if rule3_count:
+            _logger.info(
+                f"cleanup rule 3: deleting {rule3_count} records with "
+                f"unparsed address text"
+            )
         total += self.execute("""
             DELETE FROM provisional_sales
-            WHERE street_name LIKE '% NSW %'
-               OR street_name LIKE '%on __ ___ 20__%'
-               OR LENGTH(street_name) > 80
+            WHERE street_name LIKE '% NSW 2___%'
+               OR street_name LIKE '%sold on __ ___ 20__%'
+               OR LENGTH(street_name) > 120
         """)
 
-        # 4. Remove duplicates (keep the one with the latest sold_date per address)
+        # 4. Remove duplicates and keep best row per address:
+        #    priced > unpriced, dated > undated, newest sold_date, newest ingest.
         total += self.execute("""
             DELETE FROM provisional_sales
             WHERE rowid NOT IN (
-                SELECT MIN(rowid) FROM provisional_sales
-                GROUP BY address_normalised
+                SELECT rowid
+                FROM (
+                    SELECT
+                        rowid,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY address_normalised
+                            ORDER BY
+                                CASE WHEN sold_price IS NOT NULL THEN 1 ELSE 0 END DESC,
+                                CASE WHEN sold_date IS NOT NULL AND sold_date <> '' THEN 1 ELSE 0 END DESC,
+                                sold_date DESC,
+                                ingested_at DESC,
+                                rowid DESC
+                        ) AS rn
+                    FROM provisional_sales
+                )
+                WHERE rn = 1
             )
         """)
 

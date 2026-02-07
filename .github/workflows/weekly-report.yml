@@ -164,6 +164,10 @@ jobs:
             timezone: Australia/Sydney
           EOF
 
+      - name: Install Playwright browser
+        run: |
+          playwright install chromium --with-deps
+
       - name: Create data directories
         run: |
           mkdir -p data/raw logs outputs
@@ -192,6 +196,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           python -m tracker ingest-google
+
+      - name: Step 1b2 - Scrape Domain.com.au sold listings (headless browser)
+        run: |
+          python -m tracker ingest-domain-scrape || echo "Domain scrape failed (non-critical), continuing..."
 
       - name: Step 1c - Match provisional sales to VG
         run: |
