@@ -38,6 +38,9 @@ class SaleRecord:
     address: str
     price: int
     area_sqm: Optional[float] = None
+    source: str = 'confirmed'  # 'confirmed' (VG) or 'unconfirmed' (provisional)
+    listing_url: Optional[str] = None
+    bed_bath_car: Optional[str] = None  # e.g. "2bed/1bath/1car"
 
 
 @dataclass
@@ -235,7 +238,35 @@ def get_period_sales(
 
     rows = db.query(query, tuple(params))
 
-    return [row['purchase_price'] for row in rows]
+    prices = [row['purchase_price'] for row in rows]
+
+    # Also include approved provisional sales (use_in_median = 1) in medians.
+    # These are Domain-scraped sales that have been reviewed and approved.
+    prov_where = f"""
+        LOWER(suburb) IN ({placeholders})
+        AND property_type = ?
+        AND sold_date BETWEEN ? AND ?
+        AND sold_price > 0
+        AND use_in_median = 1
+    """
+    prov_params: List = list(suburbs) + [
+        segment.property_type, start_date.isoformat(), end_date.isoformat()
+    ]
+
+    if segment.price_min is not None:
+        prov_where += " AND sold_price >= ?"
+        prov_params.append(segment.price_min)
+    if segment.price_max is not None:
+        prov_where += " AND sold_price <= ?"
+        prov_params.append(segment.price_max)
+
+    prov_query = f"""
+        SELECT sold_price FROM provisional_sales WHERE {prov_where}
+    """
+    prov_rows = db.query(prov_query, tuple(prov_params))
+    prices.extend([row['sold_price'] for row in prov_rows])
+
+    return prices
 
 
 def get_period_sales_with_details(
@@ -400,16 +431,74 @@ def get_new_sales_since_date(
     rows = db.query(query, tuple(params))
 
     sales = []
+    confirmed_addresses = set()
     for row in rows:
         unit = f"Unit {row['unit_number']} " if row['unit_number'] else ""
         house = row['house_number'] or ""
         address = f"{unit}{house} {row['street_name']}".strip()
+        confirmed_addresses.add(address.lower())
 
         sales.append(SaleRecord(
             contract_date=row['contract_date'],
             address=address,
             price=row['purchase_price'],
             area_sqm=row['area_sqm'],
+            source='confirmed',
+        ))
+
+    # Also include provisional (unconfirmed) sales from Domain scrape / DDG
+    prov_where = f"""
+        LOWER(suburb) IN ({placeholders})
+        AND property_type = ?
+        AND sold_date >= ?
+        AND sold_price > 0
+        AND status = 'unconfirmed'
+    """
+    prov_params: List = list(suburbs) + [segment.property_type, since_date.isoformat()]
+
+    # Apply price filters to provisional too
+    if segment.price_min is not None:
+        prov_where += " AND sold_price >= ?"
+        prov_params.append(segment.price_min)
+    if segment.price_max is not None:
+        prov_where += " AND sold_price <= ?"
+        prov_params.append(segment.price_max)
+
+    prov_query = f"""
+        SELECT sold_date, house_number, unit_number, street_name,
+               sold_price, listing_url, bedrooms, bathrooms, car_spaces
+        FROM provisional_sales
+        WHERE {prov_where}
+        ORDER BY sold_date DESC
+    """
+
+    prov_rows = db.query(prov_query, tuple(prov_params))
+
+    for row in prov_rows:
+        unit = f"Unit {row['unit_number']} " if row['unit_number'] else ""
+        house = row['house_number'] or ""
+        address = f"{unit}{house} {row['street_name']}".strip()
+
+        # Skip if already confirmed by VG
+        if address.lower() in confirmed_addresses:
+            continue
+
+        # Build bed/bath/car string
+        bbc_parts = []
+        if row['bedrooms']:
+            bbc_parts.append(f"{row['bedrooms']}bed")
+        if row['bathrooms']:
+            bbc_parts.append(f"{row['bathrooms']}bath")
+        if row['car_spaces']:
+            bbc_parts.append(f"{row['car_spaces']}car")
+
+        sales.append(SaleRecord(
+            contract_date=row['sold_date'] or '',
+            address=address,
+            price=row['sold_price'],
+            source='unconfirmed',
+            listing_url=row['listing_url'],
+            bed_bath_car='/'.join(bbc_parts) if bbc_parts else None,
         ))
 
     return sales

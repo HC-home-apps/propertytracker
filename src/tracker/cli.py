@@ -571,12 +571,15 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
     thresholds = config.get('thresholds', {})
     metrics = compute_all_metrics(db, reference_date, thresholds)
 
-    # Get new sales for each proxy segment
+    # Get new sales for all segments (proxies + targets), including provisional
+    show_targets = report_config.get('show_targets', [])
     new_sales = {}
-    for segment_code in show_proxies:
+    for segment_code in show_proxies + show_targets:
         sales = get_new_sales_since_date(db, segment_code, last_report_date)
         new_sales[segment_code] = sales
-        click.echo(f"  {segment_code}: {len(sales)} new sales")
+        confirmed = sum(1 for s in sales if s.source == 'confirmed')
+        unconfirmed = sum(1 for s in sales if s.source == 'unconfirmed')
+        click.echo(f"  {segment_code}: {len(sales)} new sales ({confirmed} confirmed, {unconfirmed} unconfirmed)")
 
     # Compute positions for each segment
     positions = {}
@@ -607,30 +610,10 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
     # Clean up bad provisional records before displaying
     db.cleanup_provisional_sales()
 
-    # Fetch unconfirmed provisional sales for report, filtered by segment
-    provisional_by_segment = {}
-    all_segment_codes = show_proxies + report_config.get('show_targets', [])
-    for segment_code in all_segment_codes:
-        seg = SEGMENTS.get(segment_code)
-        if not seg:
-            continue
-        for suburb in seg.suburbs:
-            # Only filter by suburb + property_type for report display.
-            # Skip bed/bath/car filters — DDG-scraped records often have
-            # NULL for these fields and the user can eyeball them.
-            segment_provisional = db.get_unconfirmed_provisional_sales_filtered(
-                suburb=suburb,
-                property_type=seg.property_type,
-            )
-            if segment_code not in provisional_by_segment:
-                provisional_by_segment[segment_code] = []
-            provisional_by_segment[segment_code].extend(segment_provisional)
-
-    # Format report
+    # Format report (new_sales already includes provisional sales inline)
     period_str = reference_date.strftime('%b %-d, %Y')
     message = format_simple_report(
         new_sales, positions, period_str, config,
-        provisional_by_segment=provisional_by_segment,
     )
 
     if dry_run:
@@ -641,7 +624,6 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
         telegram_config = TelegramConfig.from_env()
         success = send_simple_report(
             telegram_config, new_sales, positions, period_str, config,
-            provisional_by_segment=provisional_by_segment,
         )
 
         if success:

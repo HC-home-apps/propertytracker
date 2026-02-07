@@ -434,78 +434,94 @@ class TestFormatAlert:
 
 
 class TestProvisionalSalesInReport:
-    """Test provisional sales section in report."""
+    """Test provisional (unconfirmed) sales shown inline in report."""
 
-    def test_includes_unconfirmed_sales_section(self):
+    def test_unconfirmed_sales_shown_inline(self):
         from tracker.notify.telegram import format_simple_report
-        provisional = [
-            {
-                'unit_number': '9',
-                'house_number': '27-29',
-                'street_name': 'Morton St',
-                'suburb': 'Wollstonecraft',
-                'sold_price': 1200000,
-                'sold_date': '2026-02-03',
-                'property_type': 'unit',
-            },
-        ]
+        from tracker.compute.metrics import SaleRecord
         report = format_simple_report(
-            new_sales={},
+            new_sales={
+                'wollstonecraft_units': [
+                    SaleRecord(
+                        contract_date='2026-02-03',
+                        address='Unit 9 27-29 Morton St',
+                        price=1200000,
+                        source='unconfirmed',
+                        listing_url='https://domain.com.au/test',
+                        bed_bath_car='2bed/1bath/1car',
+                    ),
+                ],
+            },
             positions={},
             period='Feb 6, 2026',
-            config={'report': {'show_proxies': []}},
-            provisional_sales=provisional,
+            config={'report': {'show_proxies': ['wollstonecraft_units']}},
         )
-        assert 'Recent Unconfirmed' in report
         assert 'Morton St' in report
+        assert 'unconfirmed' in report
+        assert '$1,200,000' in report
+        assert '2bed/1bath/1car' in report
+        assert '1 new (unconfirmed)' in report
 
     def test_no_section_when_empty(self):
         from tracker.notify.telegram import format_simple_report
         report = format_simple_report(
-            new_sales={},
-            positions={},
-            period='Feb 6, 2026',
-            config={'report': {'show_proxies': []}},
-            provisional_sales=[],
-        )
-        assert 'Recent Unconfirmed' not in report
-
-    def test_grouped_provisional_with_bedrooms(self):
-        from tracker.notify.telegram import format_simple_report
-        provisional_by_segment = {
-            'wollstonecraft_units': [
-                {
-                    'unit_number': '9',
-                    'house_number': '27-29',
-                    'street_name': 'Morton St',
-                    'suburb': 'Wollstonecraft',
-                    'sold_price': 1200000,
-                    'sold_date': '2026-02-03',
-                    'property_type': 'unit',
-                    'bedrooms': 2,
-                    'bathrooms': 1,
-                    'car_spaces': 1,
-                },
-            ],
-        }
-        report = format_simple_report(
-            new_sales={},
+            new_sales={'wollstonecraft_units': []},
             positions={},
             period='Feb 6, 2026',
             config={'report': {'show_proxies': ['wollstonecraft_units']}},
-            provisional_by_segment=provisional_by_segment,
         )
-        assert 'Recent Unconfirmed' in report
-        assert 'Morton St' in report
-        assert '2bed/1bath/1car' in report
+        assert 'No new sales this week' in report
 
-    def test_no_grouped_section_when_all_empty(self):
+    def test_mixed_confirmed_and_unconfirmed(self):
         from tracker.notify.telegram import format_simple_report
+        from tracker.compute.metrics import SaleRecord
         report = format_simple_report(
-            new_sales={},
+            new_sales={
+                'wollstonecraft_units': [
+                    SaleRecord(
+                        contract_date='2026-02-01',
+                        address='Unit 5 10 Test St',
+                        price=1100000,
+                        source='confirmed',
+                    ),
+                    SaleRecord(
+                        contract_date='2026-02-03',
+                        address='Unit 9 27-29 Morton St',
+                        price=1200000,
+                        source='unconfirmed',
+                        bed_bath_car='2bed/1bath',
+                    ),
+                ],
+            },
             positions={},
             period='Feb 6, 2026',
-            config={'report': {'show_proxies': []}},
-            provisional_by_segment={'wollstonecraft_units': []},
+            config={'report': {'show_proxies': ['wollstonecraft_units']}},
         )
-        assert 'Recent Unconfirmed' not in report
+        assert '2 new (1 unconfirmed)' in report
+        assert 'Test St' in report
+        assert 'Morton St' in report
+        assert 'unconfirmed' in report
+
+    def test_target_segments_shown_when_have_sales(self):
+        from tracker.notify.telegram import format_simple_report
+        from tracker.compute.metrics import SaleRecord
+        report = format_simple_report(
+            new_sales={
+                'lane_cove_houses': [
+                    SaleRecord(
+                        contract_date='2026-02-04',
+                        address='10 Kariola St',
+                        price=4135000,
+                        source='unconfirmed',
+                    ),
+                ],
+            },
+            positions={},
+            period='Feb 6, 2026',
+            config={'report': {
+                'show_proxies': [],
+                'show_targets': ['lane_cove_houses'],
+            }},
+        )
+        assert 'Lane Cove' in report
+        assert 'Kariola St' in report

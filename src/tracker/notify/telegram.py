@@ -955,34 +955,61 @@ def format_simple_report(
     # Get display order from config
     report_config = config.get('report', {}) if config else {}
     show_proxies = report_config.get('show_proxies', ['revesby_houses', 'wollstonecraft_units'])
+    show_targets = report_config.get('show_targets', ['lane_cove_houses', 'chatswood_houses'])
 
-    # Section 1: Recent Sales
-    for segment_code in show_proxies:
-        if segment_code not in new_sales:
-            continue
+    # Section 1: Recent Sales — all segments, confirmed + unconfirmed inline
+    all_segments = show_proxies + show_targets
+    for segment_code in all_segments:
+        sales = new_sales.get(segment_code, [])
 
         segment = get_segment(segment_code)
         if not segment:
             continue
 
-        sales = new_sales[segment_code]
-        filter_desc = segment.get_filter_description() or ""
+        # Skip target segments with no sales
+        if segment_code in show_targets and not sales:
+            continue
 
-        # Header with filter info
+        filter_desc = segment.get_filter_description() or ""
+        confirmed_count = sum(1 for s in sales if s.source == 'confirmed')
+        unconfirmed_count = sum(1 for s in sales if s.source == 'unconfirmed')
+        total = len(sales)
+
+        # Header with filter info and counts
         header = f"<b>{segment.display_name}</b>"
         if filter_desc:
             header += f" ({filter_desc})"
-        header += f" - {len(sales)} new"
+        if unconfirmed_count > 0 and confirmed_count > 0:
+            header += f" - {total} new ({unconfirmed_count} unconfirmed)"
+        elif unconfirmed_count > 0:
+            header += f" - {total} new (unconfirmed)"
+        else:
+            header += f" - {total} new"
         lines.append(header)
 
         if sales:
             for sale in sales:
-                # Format: date: address (size) - $price
-                date_str = sale.contract_date
-                if segment.property_type == 'house' and sale.area_sqm:
-                    lines.append(f"  {date_str}: {sale.address} ({sale.area_sqm:.0f}sqm) - {format_currency(sale.price)}")
+                date_str = _format_sold_date(sale.contract_date) if sale.source == 'unconfirmed' else sale.contract_date
+                price_str = format_currency(sale.price)
+
+                # Build address display — link to Domain for unconfirmed
+                if sale.source == 'unconfirmed' and sale.listing_url:
+                    addr_display = f'<a href="{sale.listing_url}">{sale.address}</a>'
                 else:
-                    lines.append(f"  {date_str}: {sale.address} - {format_currency(sale.price)}")
+                    addr_display = sale.address
+
+                # Build line
+                if segment.property_type == 'house' and sale.area_sqm:
+                    line = f"  {date_str}: {addr_display} ({sale.area_sqm:.0f}sqm) - {price_str}"
+                elif sale.bed_bath_car:
+                    line = f"  {date_str}: {addr_display} - {price_str} ({sale.bed_bath_car})"
+                else:
+                    line = f"  {date_str}: {addr_display} - {price_str}"
+
+                if sale.source == 'unconfirmed':
+                    line += " <i>(unconfirmed)</i>"
+
+                lines.append(line)
         else:
             lines.append("  No new sales this week")
 
@@ -1015,79 +1042,6 @@ def format_simple_report(
             lines.append(line)
         else:
             lines.append(f"{pos.display_name}: {median_str} median")
-
-    # Section 3: Recent Unconfirmed Sales
-    # Filter: show last 7 days with known sold_date.
-    # Allow missing price only when explicitly marked as price_withheld.
-    from datetime import datetime, timedelta
-    _cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-
-    def _filter_provisional(sales_list):
-        """Filter provisional sales: recent sold_date + priced or price_withheld."""
-        return [
-            s for s in sales_list
-            if (
-                s.get('sold_date')
-                and s.get('sold_date', '') >= _cutoff
-                and (s.get('sold_price') or s.get('status') == 'price_withheld')
-            )
-        ]
-
-    has_provisional = False
-    if provisional_by_segment:
-        for seg_code, sales in provisional_by_segment.items():
-            if _filter_provisional(sales):
-                has_provisional = True
-                break
-
-    if has_provisional:
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-        lines.append("<b>Recent Unconfirmed Sales</b>")
-        for seg_code, sales in provisional_by_segment.items():
-            filtered = _filter_provisional(sales)
-            if not filtered:
-                continue
-            seg = get_segment(seg_code)
-            seg_name = seg.display_name if seg else seg_code
-            lines.append(f"\n<b>{seg_name}</b>")
-            for sale in filtered:
-                address = _format_provisional_address(sale)
-                price = sale.get('sold_price')
-                price_str = (
-                    format_currency(price)
-                    if price else ('Price Withheld' if sale.get('status') == 'price_withheld' else 'Price TBC')
-                )
-                sold_date = _format_sold_date(sale.get('sold_date', ''))
-                bed_info = _format_bed_bath_car(sale)
-                listing_url = sale.get('listing_url', '')
-                addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
-                line = f"  {sold_date}: {addr_display} - {price_str}"
-                if bed_info:
-                    line += f" ({bed_info})"
-                lines.append(line)
-        lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
-    elif provisional_sales:
-        # Fallback: flat list (backward compatible)
-        filtered_flat = _filter_provisional(provisional_sales)
-        if filtered_flat:
-            lines.append("")
-            lines.append("---")
-            lines.append("")
-            lines.append("<b>Recent Unconfirmed Sales</b>")
-            for sale in filtered_flat:
-                address = _format_provisional_address(sale)
-                price = sale.get('sold_price')
-                price_str = (
-                    format_currency(price)
-                    if price else ('Price Withheld' if sale.get('status') == 'price_withheld' else 'Price TBC')
-                )
-                sold_date = _format_sold_date(sale.get('sold_date', ''))
-                listing_url = sale.get('listing_url', '')
-                addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
-                lines.append(f"  {sold_date}: {addr_display} - {price_str}")
-        lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
 
     return "\n".join(lines)
 
