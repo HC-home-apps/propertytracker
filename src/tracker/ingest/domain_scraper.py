@@ -349,124 +349,182 @@ def fetch_sold_listings_scrape(
 
         # Navigate and wait for content
         page.goto(url, wait_until='domcontentloaded', timeout=45000)
-        # Give JS a moment to hydrate
-        page.wait_for_timeout(3000)
+        # Wait for listing cards to render
+        page.wait_for_timeout(4000)
 
-        # Strategy 1: Extract __NEXT_DATA__ via JS evaluation (fastest)
-        raw_listings = []
-        try:
-            next_data = page.evaluate('() => window.__NEXT_DATA__')
-            if next_data and isinstance(next_data, dict):
-                # Debug: dump the top-level pageProps keys and first listing
-                page_props = next_data.get('props', {}).get('pageProps', {})
-                logger.info(
-                    f"__NEXT_DATA__ pageProps keys: "
-                    f"{list(page_props.keys())[:15]}"
-                )
-                # Find the first list-like value to inspect its structure
-                for k, v in page_props.items():
-                    if isinstance(v, list) and len(v) > 0:
-                        first = v[0]
-                        if isinstance(first, dict):
-                            logger.info(
-                                f"  pageProps['{k}'][0] keys: "
-                                f"{list(first.keys())[:20]}"
-                            )
-                            # If it has 'listing', show that too
-                            if 'listing' in first:
-                                lk = first['listing']
-                                if isinstance(lk, dict):
-                                    logger.info(
-                                        f"    .listing keys: "
-                                        f"{list(lk.keys())[:20]}"
-                                    )
-                        break
-                    elif isinstance(v, dict):
-                        for sk, sv in v.items():
-                            if isinstance(sv, list) and len(sv) > 0:
-                                first = sv[0]
-                                if isinstance(first, dict):
-                                    logger.info(
-                                        f"  pageProps['{k}']['{sk}'][0] keys: "
-                                        f"{list(first.keys())[:20]}"
-                                    )
-                                break
+        # Extract listing data directly from rendered DOM via JavaScript.
+        # This is more robust than parsing __NEXT_DATA__ JSON which changes
+        # structure across Domain deploys.
+        raw_listings = page.evaluate("""() => {
+            const cards = document.querySelectorAll(
+                '[data-testid*="listing-card"], '
+                + '[class*="listing-result"], '
+                + '[class*="ListingCard"], '
+                + 'a[href*="/sold/"]'  // fallback: any sold listing link
+            );
 
-                raw_listings = _parse_next_data(next_data)
-                if raw_listings:
-                    logger.info(
-                        f"Extracted {len(raw_listings)} listings from "
-                        f"__NEXT_DATA__ (JS) for {suburb}"
-                    )
-        except Exception as e:
-            logger.debug(f"JS __NEXT_DATA__ extraction failed: {e}")
+            // If no cards found via selectors, try broader approach:
+            // look for any element with an address + price pattern
+            const results = [];
+            const seen = new Set();
 
-        # Strategy 2: Parse HTML for __NEXT_DATA__ tag
+            for (const card of cards) {
+                const text = card.innerText || '';
+                const href = card.href || card.querySelector('a')?.href || '';
+
+                // Skip if no useful link
+                if (!href.includes('domain.com.au/')) continue;
+                if (seen.has(href)) continue;
+                seen.add(href);
+
+                // Extract price: look for $X,XXX,XXX or $X.Xm patterns
+                let price = null;
+                const priceMatch = text.match(
+                    /\\$(\\d{1,3}(?:,\\d{3})+)/
+                ) || text.match(
+                    /\\$(\\d+\\.\\d+)\\s*[mM]/
+                );
+                if (priceMatch) {
+                    const raw = priceMatch[0].replace('$', '').replace(/,/g, '');
+                    if (raw.toLowerCase().includes('m')) {
+                        price = Math.round(parseFloat(raw) * 1000000);
+                    } else {
+                        price = parseInt(raw, 10);
+                    }
+                }
+
+                // Extract sold date: "Sold DD Mon YYYY" or "Sold on DD Mon YYYY"
+                let soldDate = '';
+                const dateMatch = text.match(
+                    /[Ss]old\\s+(?:on\\s+)?(\\d{1,2})\\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\s+(\\d{4})/i
+                );
+                if (dateMatch) {
+                    const months = {jan:'01',feb:'02',mar:'03',apr:'04',
+                        may:'05',jun:'06',jul:'07',aug:'08',
+                        sep:'09',oct:'10',nov:'11',dec:'12'};
+                    const d = dateMatch[1].padStart(2, '0');
+                    const m = months[dateMatch[2].toLowerCase()] || '01';
+                    soldDate = dateMatch[3] + '-' + m + '-' + d;
+                }
+
+                // Extract bed/bath/car from text like "3 Beds 2 Baths 1 Car"
+                const beds = text.match(/(\\d+)\\s*[Bb]ed/);
+                const baths = text.match(/(\\d+)\\s*[Bb]ath/);
+                const cars = text.match(/(\\d+)\\s*[Cc]ar/);
+
+                // Extract address from rendered card text.
+                // Domain cards typically show address as "15 Alliance Avenue"
+                // or "9/27-29 Morton Street" on the first line or in a
+                // specific element.
+                let address = '';
+
+                // Try specific address elements first
+                const addrEl = card.querySelector(
+                    '[data-testid*="address"], '
+                    + '[class*="address-line1"], '
+                    + '[class*="Address"], '
+                    + 'h2'
+                );
+                if (addrEl) {
+                    // Take first line only (address line 1, not suburb)
+                    const addrText = addrEl.textContent.trim();
+                    const firstLine = addrText.split('\\n')[0].trim();
+                    // Only use if it starts with a number (looks like street address)
+                    if (/^\\d/.test(firstLine)) {
+                        address = firstLine;
+                    }
+                }
+
+                // Fallback: first line of card text that looks like an address
+                if (!address) {
+                    const lines = text.split('\\n')
+                        .map(l => l.trim())
+                        .filter(l => l.length > 0);
+                    for (const line of lines) {
+                        // Match "15 Alliance Avenue" or "9/27-29 Morton St"
+                        if (/^\\d+[a-zA-Z]?\\s*[\\/]?\\s*\\d*/.test(line) &&
+                            /[A-Za-z]/.test(line) &&
+                            line.length < 80) {
+                            address = line;
+                            break;
+                        }
+                    }
+                }
+
+                results.push({
+                    address: address,
+                    price: price,
+                    sold_date: soldDate,
+                    url: href,
+                    bedrooms: beds ? parseInt(beds[1]) : null,
+                    bathrooms: baths ? parseInt(baths[1]) : null,
+                    car_spaces: cars ? parseInt(cars[1]) : null,
+                    raw_text: text.substring(0, 300),
+                });
+            }
+            return results;
+        }""")
+
+        logger.info(
+            f"DOM extraction: {len(raw_listings)} listing elements for {suburb}"
+        )
+
+        # If DOM extraction found nothing, fall back to __NEXT_DATA__
+        if not raw_listings:
+            try:
+                next_data = page.evaluate('() => window.__NEXT_DATA__')
+                if next_data and isinstance(next_data, dict):
+                    raw_listings = _parse_next_data(next_data)
+                    if raw_listings:
+                        logger.info(
+                            f"Fallback: {len(raw_listings)} from __NEXT_DATA__"
+                        )
+            except Exception:
+                pass
+
+        # If still nothing, try JSON-LD from HTML
         if not raw_listings:
             html = page.content()
-            logger.info(f"Got {len(html)} bytes of HTML for {suburb}")
+            raw_listings = _extract_json_ld(html)
+            if raw_listings:
+                logger.info(f"Fallback: {len(raw_listings)} from JSON-LD")
 
-            next_data = _extract_next_data(html)
-            if next_data:
-                raw_listings = _parse_next_data(next_data)
-                if raw_listings:
-                    logger.info(
-                        f"Extracted {len(raw_listings)} listings from "
-                        f"__NEXT_DATA__ (HTML) for {suburb}"
-                    )
-
-            # Strategy 3: JSON-LD fallback
-            if not raw_listings:
-                raw_listings = _extract_json_ld(html)
-                if raw_listings:
-                    logger.info(
-                        f"Extracted {len(raw_listings)} listings from "
-                        f"JSON-LD for {suburb}"
-                    )
-
-            if not raw_listings:
-                logger.warning(
-                    f"No listings found in Domain page for {suburb} "
-                    f"({len(html)} bytes)"
-                )
-                if '__NEXT_DATA__' in html:
-                    logger.debug("__NEXT_DATA__ tag present but no listings parsed")
-                else:
-                    logger.debug("No __NEXT_DATA__ tag found in HTML")
-
-        # Debug: log first listing to understand the data structure
+        # Log first result for debugging
         if raw_listings:
-            sample = raw_listings[0]
+            s = raw_listings[0]
             logger.info(
-                f"Sample listing keys: {list(sample.keys())}, "
-                f"address='{sample.get('address', '')}', "
-                f"price={sample.get('price')}, "
-                f"property_type='{sample.get('property_type', '')}', "
-                f"sold_date='{sample.get('sold_date', '')}'"
+                f"Sample: address='{s.get('address', '')[:60]}', "
+                f"price={s.get('price')}, "
+                f"date='{s.get('sold_date', '')}', "
+                f"text='{s.get('raw_text', '')[:80]}'"
             )
 
         # Convert to provisional_sales format
-        skipped_no_parse = 0
-        skipped_type_mismatch = 0
         for listing_data in raw_listings:
-            parsed = _parse_listing_from_card(listing_data, suburb, postcode)
-            if not parsed:
-                skipped_no_parse += 1
-                continue
-            if parsed['property_type'] == property_type:
-                results.append(parsed)
-            elif listing_data.get('property_type') == 'other':
-                parsed['property_type'] = property_type
-                results.append(parsed)
-            else:
-                skipped_type_mismatch += 1
+            # For DOM-extracted listings, parse address from raw_text
+            # if the URL-based address didn't work
+            if not listing_data.get('address') and listing_data.get('raw_text'):
+                # Try to extract address from the card text
+                raw = listing_data['raw_text']
+                addr_match = re.match(
+                    r'^(\d+[a-zA-Z]?\s*/\s*)?(\d+(?:-\d+)?[a-zA-Z]?)\s+(.+?)(?:\s*,|\n)',
+                    raw,
+                )
+                if addr_match:
+                    parts = []
+                    if addr_match.group(1):
+                        parts.append(addr_match.group(1).strip())
+                    parts.append(addr_match.group(2))
+                    parts.append(addr_match.group(3).strip())
+                    listing_data['address'] = ' '.join(parts)
 
-        if skipped_no_parse or skipped_type_mismatch:
-            logger.info(
-                f"Filtering: {skipped_no_parse} unparseable, "
-                f"{skipped_type_mismatch} type mismatch "
-                f"(wanted '{property_type}')"
-            )
+            # Remove raw_text before passing to parser
+            listing_data.pop('raw_text', None)
+            listing_data['property_type'] = property_type
+
+            parsed = _parse_listing_from_card(listing_data, suburb, postcode)
+            if parsed:
+                results.append(parsed)
 
         logger.info(f"Domain scrape: {len(results)} sold {property_type}s in {suburb}")
 
