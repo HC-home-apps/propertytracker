@@ -357,6 +357,41 @@ def fetch_sold_listings_scrape(
         try:
             next_data = page.evaluate('() => window.__NEXT_DATA__')
             if next_data and isinstance(next_data, dict):
+                # Debug: dump the top-level pageProps keys and first listing
+                page_props = next_data.get('props', {}).get('pageProps', {})
+                logger.info(
+                    f"__NEXT_DATA__ pageProps keys: "
+                    f"{list(page_props.keys())[:15]}"
+                )
+                # Find the first list-like value to inspect its structure
+                for k, v in page_props.items():
+                    if isinstance(v, list) and len(v) > 0:
+                        first = v[0]
+                        if isinstance(first, dict):
+                            logger.info(
+                                f"  pageProps['{k}'][0] keys: "
+                                f"{list(first.keys())[:20]}"
+                            )
+                            # If it has 'listing', show that too
+                            if 'listing' in first:
+                                lk = first['listing']
+                                if isinstance(lk, dict):
+                                    logger.info(
+                                        f"    .listing keys: "
+                                        f"{list(lk.keys())[:20]}"
+                                    )
+                        break
+                    elif isinstance(v, dict):
+                        for sk, sv in v.items():
+                            if isinstance(sv, list) and len(sv) > 0:
+                                first = sv[0]
+                                if isinstance(first, dict):
+                                    logger.info(
+                                        f"  pageProps['{k}']['{sk}'][0] keys: "
+                                        f"{list(first.keys())[:20]}"
+                                    )
+                                break
+
                 raw_listings = _parse_next_data(next_data)
                 if raw_listings:
                     logger.info(
