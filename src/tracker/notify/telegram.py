@@ -849,7 +849,7 @@ def _format_provisional_address(sale: dict) -> str:
 def _format_sold_date(date_str: str) -> str:
     """Format ISO date string (2026-01-30) to human-readable (30 Jan 2026)."""
     if not date_str:
-        return ''
+        return 'Recent'
     try:
         from datetime import datetime
         dt = datetime.strptime(date_str[:10], '%Y-%m-%d')
@@ -964,15 +964,15 @@ def format_simple_report(
             lines.append(f"{pos.display_name}: {median_str} median")
 
     # Section 3: Recent Unconfirmed Sales
-    # Filter: skip entries with no price, and only show last 60 days
+    # Filter: only show last 60 days (if date known), include price-unknown listings
     from datetime import datetime, timedelta
     _cutoff = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
 
     def _filter_provisional(sales_list):
-        """Filter provisional sales: must have price, within last 60 days."""
+        """Filter provisional sales: within last 60 days (or date unknown)."""
         return [
             s for s in sales_list
-            if s.get('sold_price') and (s.get('sold_date', '') >= _cutoff)
+            if not s.get('sold_date') or s.get('sold_date', '') >= _cutoff
         ]
 
     has_provisional = False
@@ -996,12 +996,13 @@ def format_simple_report(
             lines.append(f"\n<b>{seg_name}</b>")
             for sale in filtered:
                 address = _format_provisional_address(sale)
-                price = sale.get('sold_price', 0)
+                price = sale.get('sold_price')
+                price_str = format_currency(price) if price else 'Price TBC'
                 sold_date = _format_sold_date(sale.get('sold_date', ''))
                 bed_info = _format_bed_bath_car(sale)
                 listing_url = sale.get('listing_url', '')
                 addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
-                line = f"  {sold_date}: {addr_display} - {format_currency(price)}"
+                line = f"  {sold_date}: {addr_display} - {price_str}"
                 if bed_info:
                     line += f" ({bed_info})"
                 lines.append(line)
@@ -1016,11 +1017,12 @@ def format_simple_report(
             lines.append("<b>Recent Unconfirmed Sales</b>")
             for sale in filtered_flat:
                 address = _format_provisional_address(sale)
-                price = sale.get('sold_price', 0)
+                price = sale.get('sold_price')
+                price_str = format_currency(price) if price else 'Price TBC'
                 sold_date = _format_sold_date(sale.get('sold_date', ''))
                 listing_url = sale.get('listing_url', '')
                 addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
-                lines.append(f"  {sold_date}: {addr_display} - {format_currency(price)}")
+                lines.append(f"  {sold_date}: {addr_display} - {price_str}")
         lines.append("  <i>(Not in medians - awaiting VG confirmation)</i>")
 
     return "\n".join(lines)
