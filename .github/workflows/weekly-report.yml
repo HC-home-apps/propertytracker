@@ -181,6 +181,7 @@ jobs:
             tracker-db-
 
       - name: Step 1 - Ingest new sales data
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -192,6 +193,7 @@ jobs:
           python -m tracker ingest $FORCE_FLAG
 
       - name: Step 1b - Ingest sold listings (DuckDuckGo multi-site search)
+        continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
