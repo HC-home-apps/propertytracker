@@ -49,6 +49,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Install Playwright browsers
+        run: |
+          playwright install chromium --with-deps
+
       - name: Create config file
         run: |
           # Financial values are loaded from environment variables (SAVINGS_BALANCE,
@@ -187,10 +191,9 @@ jobs:
           fi
           python -m tracker ingest $FORCE_FLAG
 
-      - name: Step 1b - Ingest sold listings (DuckDuckGo + Domain API)
+      - name: Step 1b - Ingest sold listings (DuckDuckGo + Domain scrape)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          DOMAIN_API_KEY: ${{ secrets.DOMAIN_API_KEY }}
         run: |
           python -m tracker ingest-google
 

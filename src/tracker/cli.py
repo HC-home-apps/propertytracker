@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from tracker.db import Database
 from tracker.ingest.downloader import download_psi_archive, extract_archive, get_data_path
 from tracker.ingest.parser import parse_all_csv_files
-from tracker.ingest.domain_sold import fetch_sold_listings
+from tracker.ingest.domain_scraper import fetch_sold_listings_scrape
 from tracker.ingest.matcher import match_provisional_to_vg
 from tracker.ingest.google_search import fetch_sold_listings_google
 from tracker.compute.segments import (
@@ -284,7 +284,6 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
         return
 
     anthropic_key = os.getenv('ANTHROPIC_API_KEY') if enrich else None
-    domain_api_key = os.getenv('DOMAIN_API_KEY')
     total_ingested = 0
 
     with Database(config.get('database', {}).get('path', ctx.obj['db_path'])) as db:
@@ -367,30 +366,30 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
             except Exception as e:
                 click.echo(f"  DDG {search_suburb}: Error - {e}", err=True)
 
-            # Source 2: Domain API (complementary — returns recent sold listings)
-            if domain_api_key:
-                for suburb in seg.suburbs:
-                    try:
-                        pc_rows = db.query(
-                            "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
-                            (suburb,)
-                        )
-                        pc = pc_rows[0]['postcode'] if pc_rows else postcode
+            # Source 2: Domain.com.au scraping (headless browser)
+            for suburb in seg.suburbs:
+                try:
+                    pc_rows = db.query(
+                        "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
+                        (suburb,)
+                    )
+                    pc = pc_rows[0]['postcode'] if pc_rows else postcode
 
-                        domain_results = fetch_sold_listings(
-                            suburb=suburb,
-                            property_type=seg.property_type,
-                            postcode=pc,
-                            api_key=domain_api_key,
-                        )
+                    scrape_results = fetch_sold_listings_scrape(
+                        suburb=suburb,
+                        property_type=seg.property_type,
+                        postcode=pc,
+                    )
 
-                        if domain_results:
-                            count = db.upsert_provisional_sales(domain_results)
-                            total_ingested += count
-                            click.echo(f"  Domain API {suburb}: {count} new sales")
+                    if scrape_results:
+                        count = db.upsert_provisional_sales(scrape_results)
+                        total_ingested += count
+                        click.echo(f"  Domain scrape {suburb}: {count} new sales")
+                    else:
+                        click.echo(f"  Domain scrape {suburb}: 0 results")
 
-                    except Exception as e:
-                        click.echo(f"  Domain API {suburb}: Error - {e}", err=True)
+                except Exception as e:
+                    click.echo(f"  Domain scrape {suburb}: Error - {e}", err=True)
 
     click.echo(f"\nTotal ingested: {total_ingested} sales")
 
