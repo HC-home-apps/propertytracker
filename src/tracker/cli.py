@@ -233,7 +233,7 @@ def ingest_domain(ctx):
                     "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
                     (suburb,)
                 )
-                postcode = str(int(postcode_rows[0]['postcode'])) if postcode_rows else ''
+                postcode = str(int(float(postcode_rows[0]['postcode']))) if postcode_rows else ''
 
                 click.echo(f"Fetching Domain sold listings for {suburb} ({prop_type})...")
                 listings = fetch_sold_listings(
@@ -305,7 +305,7 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
                 "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
                 (search_suburb,)
             )
-            postcode = str(int(postcode_rows[0]['postcode'])) if postcode_rows else ''
+            postcode = str(int(float(postcode_rows[0]['postcode']))) if postcode_rows else ''
 
             # Source 1: DuckDuckGo search
             try:
@@ -373,7 +373,7 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
                         "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
                         (suburb,)
                     )
-                    pc = str(int(pc_rows[0]['postcode'])) if pc_rows else postcode
+                    pc = str(int(float(pc_rows[0]['postcode']))) if pc_rows else postcode
 
                     scrape_results = fetch_sold_listings_scrape(
                         suburb=suburb,
