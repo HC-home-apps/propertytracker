@@ -284,17 +284,21 @@ def build_digest_keyboard(sale_ids: List[tuple], segment_code: str) -> dict:
     """
     rows = []
 
+    # Abbreviate segment code to fit Telegram's 64-byte callback_data limit
+    # (e.g. "wollstonecraft_units" → "woll" saves 16 bytes)
+    seg_short = segment_code[:4]
+
     # One row per sale
     for idx, (sale_id, _) in enumerate(sale_ids, 1):
         rows.append([
-            {"text": f"{idx} ✅", "callback_data": f"review:{segment_code}:{sale_id}:yes"},
-            {"text": f"{idx} ❌", "callback_data": f"review:{segment_code}:{sale_id}:no"},
+            {"text": f"{idx} ✅", "callback_data": f"review:{seg_short}:{sale_id}:yes"},
+            {"text": f"{idx} ❌", "callback_data": f"review:{seg_short}:{sale_id}:no"},
         ])
 
     # Bulk row
     rows.append([
-        {"text": "All ✅", "callback_data": f"review:{segment_code}:all:yes"},
-        {"text": "All ❌", "callback_data": f"review:{segment_code}:all:no"},
+        {"text": "All ✅", "callback_data": f"review:{seg_short}:all:yes"},
+        {"text": "All ❌", "callback_data": f"review:{seg_short}:all:no"},
     ])
 
     return {"inline_keyboard": rows}
