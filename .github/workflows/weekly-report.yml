@@ -229,6 +229,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_REPORT_CHAT_ID: ${{ secrets.TELEGRAM_REPORT_CHAT_ID }}
+          TELEGRAM_REPORT_CHAT_IDS: ${{ secrets.TELEGRAM_REPORT_CHAT_IDS }}
           SAVINGS_BALANCE: ${{ secrets.SAVINGS_BALANCE }}
           SAVINGS_MONTHLY: ${{ secrets.SAVINGS_MONTHLY }}
           PPOR_DEBT: ${{ secrets.PPOR_DEBT }}

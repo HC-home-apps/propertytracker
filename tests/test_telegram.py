@@ -174,6 +174,16 @@ class TestTelegramConfig:
             assert config.bot_token == 'test_token'
             assert config.chat_id == '12345'
 
+    def test_get_report_chat_ids_from_comma_list(self):
+        """Parse and dedupe TELEGRAM_REPORT_CHAT_IDS values."""
+        config = TelegramConfig(
+            bot_token='test_token',
+            chat_id='12345',
+            report_chat_id='-1002',
+            report_chat_ids='-1001, -1002, -1001',
+        )
+        assert config.get_report_chat_ids() == ['-1001', '-1002']
+
     def test_from_env_missing_token(self):
         """Raises when token missing."""
         with patch.dict('os.environ', {
@@ -207,6 +217,23 @@ class TestSendMessage:
         result = send_message(config, "Test message")
 
         assert result is False
+
+    @patch('tracker.notify.telegram.requests.post')
+    def test_report_send_to_multiple_chats(self, mock_post):
+        """Send report to all configured report chat IDs."""
+        mock_post.return_value.status_code = 200
+
+        config = TelegramConfig(
+            bot_token='token',
+            chat_id='123',
+            report_chat_ids='-1001,-1002',
+        )
+        result = send_message(config, "Report", use_report_chat=True)
+
+        assert result is True
+        assert mock_post.call_count == 2
+        sent_chat_ids = [call.kwargs['json']['chat_id'] for call in mock_post.call_args_list]
+        assert sent_chat_ids == ['-1001', '-1002']
 
 
 class TestFormatMetricLine:

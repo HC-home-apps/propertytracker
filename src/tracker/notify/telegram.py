@@ -37,6 +37,7 @@ class TelegramConfig:
     bot_token: str
     chat_id: str
     report_chat_id: Optional[str] = None  # Separate chat ID for reports (e.g., group chat)
+    report_chat_ids: Optional[str] = None  # Comma-separated report chat IDs
 
     @classmethod
     def from_env(cls) -> 'TelegramConfig':
@@ -44,17 +45,49 @@ class TelegramConfig:
         token = os.getenv('TELEGRAM_BOT_TOKEN')
         chat_id = os.getenv('TELEGRAM_CHAT_ID')
         report_chat_id = os.getenv('TELEGRAM_REPORT_CHAT_ID')
+        report_chat_ids = os.getenv('TELEGRAM_REPORT_CHAT_IDS')
 
         if not token or not chat_id:
             raise ValueError(
                 "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set"
             )
 
-        return cls(bot_token=token, chat_id=chat_id, report_chat_id=report_chat_id)
+        return cls(
+            bot_token=token,
+            chat_id=chat_id,
+            report_chat_id=report_chat_id,
+            report_chat_ids=report_chat_ids,
+        )
 
     def get_report_chat_id(self) -> str:
         """Get chat ID for reports (uses report_chat_id if set, else chat_id)."""
         return self.report_chat_id or self.chat_id
+
+    def get_report_chat_ids(self) -> List[str]:
+        """Get all report chat IDs (deduplicated, preserving order)."""
+        ids: List[str] = []
+
+        if self.report_chat_ids:
+            ids.extend(
+                part.strip() for part in self.report_chat_ids.split(',')
+                if part.strip()
+            )
+
+        if self.report_chat_id:
+            ids.append(self.report_chat_id)
+
+        if not ids:
+            ids.append(self.chat_id)
+
+        # Dedupe while preserving order
+        seen = set()
+        deduped = []
+        for cid in ids:
+            if cid not in seen:
+                deduped.append(cid)
+                seen.add(cid)
+
+        return deduped
 
 
 def send_message(
@@ -77,34 +110,54 @@ def send_message(
     """
     url = f"{TELEGRAM_API_BASE}{config.bot_token}/sendMessage"
 
-    chat_id = config.get_report_chat_id() if use_report_chat else config.chat_id
-
     payload = {
-        'chat_id': chat_id,
         'text': message,
         'parse_mode': parse_mode,
         'disable_web_page_preview': True,
     }
 
-    try:
-        response = requests.post(url, json=payload, timeout=30)
-        if response.status_code != 200:
-            logger.error(f"Telegram API error {response.status_code}: {response.text}")
+    # Regular messages: single destination (personal chat).
+    if not use_report_chat:
+        request_payload = dict(payload)
+        request_payload['chat_id'] = config.chat_id
+        try:
+            response = requests.post(url, json=request_payload, timeout=30)
+            response.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            logger.error(f"Failed to send Telegram message: {e}")
+            return False
 
-            # Fallback: if report chat fails, try the personal chat
-            if use_report_chat and config.report_chat_id and chat_id != config.chat_id:
-                logger.info("Falling back to personal chat for report delivery")
-                payload['chat_id'] = config.chat_id
-                fallback = requests.post(url, json=payload, timeout=30)
-                if fallback.status_code == 200:
-                    return True
-                logger.error(f"Fallback also failed: {fallback.status_code}: {fallback.text}")
+    # Report messages: can target one or many report chats.
+    target_chat_ids = config.get_report_chat_ids()
+    success = False
 
-        response.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        logger.error(f"Failed to send Telegram message: {e}")
-        return False
+    for chat_id in target_chat_ids:
+        request_payload = dict(payload)
+        request_payload['chat_id'] = chat_id
+        try:
+            response = requests.post(url, json=request_payload, timeout=30)
+            if response.status_code != 200:
+                logger.error(f"Telegram API error {response.status_code} for chat {chat_id}: {response.text}")
+                continue
+            success = True
+        except requests.RequestException as e:
+            logger.error(f"Failed to send Telegram message to chat {chat_id}: {e}")
+
+    # Fallback: if all configured report chats failed, try personal chat.
+    if not success and config.chat_id not in target_chat_ids:
+        logger.info("Falling back to personal chat for report delivery")
+        request_payload = dict(payload)
+        request_payload['chat_id'] = config.chat_id
+        try:
+            fallback = requests.post(url, json=request_payload, timeout=30)
+            if fallback.status_code == 200:
+                return True
+            logger.error(f"Fallback also failed: {fallback.status_code}: {fallback.text}")
+        except requests.RequestException as e:
+            logger.error(f"Fallback to personal chat failed: {e}")
+
+    return success
 
 
 def send_review_with_buttons(
@@ -964,15 +1017,20 @@ def format_simple_report(
             lines.append(f"{pos.display_name}: {median_str} median")
 
     # Section 3: Recent Unconfirmed Sales
-    # Filter: show last 120 days (if date known), include date-unknown listings
+    # Filter: show last 7 days with known sold_date.
+    # Allow missing price only when explicitly marked as price_withheld.
     from datetime import datetime, timedelta
-    _cutoff = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
+    _cutoff = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
 
     def _filter_provisional(sales_list):
-        """Filter provisional sales: within last 120 days (or date unknown)."""
+        """Filter provisional sales: recent sold_date + priced or price_withheld."""
         return [
             s for s in sales_list
-            if not s.get('sold_date') or s.get('sold_date', '') >= _cutoff
+            if (
+                s.get('sold_date')
+                and s.get('sold_date', '') >= _cutoff
+                and (s.get('sold_price') or s.get('status') == 'price_withheld')
+            )
         ]
 
     has_provisional = False
@@ -997,7 +1055,10 @@ def format_simple_report(
             for sale in filtered:
                 address = _format_provisional_address(sale)
                 price = sale.get('sold_price')
-                price_str = format_currency(price) if price else 'Price TBC'
+                price_str = (
+                    format_currency(price)
+                    if price else ('Price Withheld' if sale.get('status') == 'price_withheld' else 'Price TBC')
+                )
                 sold_date = _format_sold_date(sale.get('sold_date', ''))
                 bed_info = _format_bed_bath_car(sale)
                 listing_url = sale.get('listing_url', '')
@@ -1018,7 +1079,10 @@ def format_simple_report(
             for sale in filtered_flat:
                 address = _format_provisional_address(sale)
                 price = sale.get('sold_price')
-                price_str = format_currency(price) if price else 'Price TBC'
+                price_str = (
+                    format_currency(price)
+                    if price else ('Price Withheld' if sale.get('status') == 'price_withheld' else 'Price TBC')
+                )
                 sold_date = _format_sold_date(sale.get('sold_date', ''))
                 listing_url = sale.get('listing_url', '')
                 addr_display = f'<a href="{listing_url}">{address}</a>' if listing_url else address
