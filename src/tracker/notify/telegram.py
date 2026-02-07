@@ -963,13 +963,13 @@ def format_simple_report(
         else:
             lines.append(f"{pos.display_name}: {median_str} median")
 
-    # Section 3: Recent Unconfirmed Sales (Domain)
-    # Filter: skip entries with no price, and only show last 6 months
+    # Section 3: Recent Unconfirmed Sales
+    # Filter: skip entries with no price, and only show last 60 days
     from datetime import datetime, timedelta
-    _cutoff = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
+    _cutoff = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
 
     def _filter_provisional(sales_list):
-        """Filter provisional sales: must have price, within last 6 months."""
+        """Filter provisional sales: must have price, within last 60 days."""
         return [
             s for s in sales_list
             if s.get('sold_price') and (s.get('sold_date', '') >= _cutoff)

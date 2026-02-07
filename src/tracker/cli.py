@@ -284,6 +284,7 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
         return
 
     anthropic_key = os.getenv('ANTHROPIC_API_KEY') if enrich else None
+    domain_api_key = os.getenv('DOMAIN_API_KEY')
     total_ingested = 0
 
     with Database(config.get('database', {}).get('path', ctx.obj['db_path'])) as db:
@@ -307,7 +308,7 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
             )
             postcode = postcode_rows[0]['postcode'] if postcode_rows else ''
 
-            # Fetch from Google
+            # Source 1: DuckDuckGo search
             try:
                 results = fetch_sold_listings_google(
                     suburb=search_suburb,
@@ -317,58 +318,79 @@ def ingest_google(ctx, segment: Optional[str], enrich: bool):
                     bathrooms=seg.bathrooms,
                 )
 
-                if not results:
-                    continue
+                if results:
+                    # Convert to provisional_sales format
+                    sales = []
+                    for listing in results:
+                        addr_hash = hash(listing['address_normalised'])
+                        sale_id = f"google-{abs(addr_hash)}"
 
-                # Convert to provisional_sales format
-                sales = []
-                for listing in results:
-                    addr_hash = hash(listing['address_normalised'])
-                    sale_id = f"google-{abs(addr_hash)}"
+                        status = 'price_withheld' if listing.get('price_withheld', False) else 'unconfirmed'
 
-                    status = 'price_withheld' if listing.get('price_withheld', False) else 'unconfirmed'
+                        sale = {
+                            'id': sale_id,
+                            'source': 'google',
+                            'unit_number': listing.get('unit_number'),
+                            'house_number': listing.get('house_number', ''),
+                            'street_name': listing.get('street_name', ''),
+                            'suburb': listing.get('suburb', search_suburb),
+                            'postcode': listing.get('postcode', postcode),
+                            'property_type': seg.property_type,
+                            'sold_price': listing.get('sold_price'),
+                            'sold_date': listing.get('sold_date'),
+                            'bedrooms': listing.get('bedrooms'),
+                            'bathrooms': listing.get('bathrooms'),
+                            'car_spaces': listing.get('car_spaces'),
+                            'address_normalised': listing['address_normalised'],
+                            'listing_url': listing.get('listing_url', ''),
+                            'source_site': listing.get('source_site', ''),
+                            'status': status,
+                            'raw_json': __import__('json').dumps(listing),
+                        }
 
-                    sale = {
-                        'id': sale_id,
-                        'source': 'google',
-                        'unit_number': listing.get('unit_number'),
-                        'house_number': listing.get('house_number', ''),
-                        'street_name': listing.get('street_name', ''),
-                        'suburb': listing.get('suburb', search_suburb),
-                        'postcode': listing.get('postcode', postcode),
-                        'property_type': seg.property_type,
-                        'sold_price': listing.get('sold_price'),
-                        'sold_date': listing.get('sold_date'),
-                        'bedrooms': listing.get('bedrooms'),
-                        'bathrooms': listing.get('bathrooms'),
-                        'car_spaces': listing.get('car_spaces'),
-                        'address_normalised': listing['address_normalised'],
-                        'listing_url': listing.get('listing_url', ''),
-                        'source_site': listing.get('source_site', ''),
-                        'status': status,
-                        'raw_json': __import__('json').dumps(listing),
-                    }
+                        # Optionally enrich with LLM
+                        if enrich and anthropic_key and not listing.get('sold_price'):
+                            listing_url = listing.get('listing_url')
+                            if listing_url:
+                                details = extract_listing_details(listing_url, search_suburb, anthropic_key)
+                                if details:
+                                    sale['sold_price'] = details.get('price')
+                                    sale['bedrooms'] = sale['bedrooms'] or details.get('bedrooms')
+                                    sale['bathrooms'] = sale['bathrooms'] or details.get('bathrooms')
 
-                    # Optionally enrich with LLM
-                    if enrich and anthropic_key and not listing.get('sold_price'):
-                        listing_url = listing.get('listing_url')
-                        if listing_url:
-                            details = extract_listing_details(listing_url, search_suburb, anthropic_key)
-                            if details:
-                                sale['sold_price'] = details.get('price')
-                                sale['bedrooms'] = sale['bedrooms'] or details.get('bedrooms')
-                                sale['bathrooms'] = sale['bathrooms'] or details.get('bathrooms')
+                        sales.append(sale)
 
-                    sales.append(sale)
-
-                # Upsert to database
-                count = db.upsert_provisional_sales(sales)
-                total_ingested += count
-                click.echo(f"  {search_suburb}: {count} new sales")
+                    count = db.upsert_provisional_sales(sales)
+                    total_ingested += count
+                    click.echo(f"  DDG {search_suburb}: {count} new sales")
 
             except Exception as e:
-                click.echo(f"  {search_suburb}: Error - {e}", err=True)
-                continue
+                click.echo(f"  DDG {search_suburb}: Error - {e}", err=True)
+
+            # Source 2: Domain API (complementary — returns recent sold listings)
+            if domain_api_key:
+                for suburb in seg.suburbs:
+                    try:
+                        pc_rows = db.query(
+                            "SELECT DISTINCT postcode FROM raw_sales WHERE LOWER(suburb) = LOWER(?) LIMIT 1",
+                            (suburb,)
+                        )
+                        pc = pc_rows[0]['postcode'] if pc_rows else postcode
+
+                        domain_results = fetch_sold_listings(
+                            suburb=suburb,
+                            property_type=seg.property_type,
+                            postcode=pc,
+                            api_key=domain_api_key,
+                        )
+
+                        if domain_results:
+                            count = db.upsert_provisional_sales(domain_results)
+                            total_ingested += count
+                            click.echo(f"  Domain API {suburb}: {count} new sales")
+
+                    except Exception as e:
+                        click.echo(f"  Domain API {suburb}: Error - {e}", err=True)
 
     click.echo(f"\nTotal ingested: {total_ingested} sales")
 
