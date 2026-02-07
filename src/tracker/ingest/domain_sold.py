@@ -29,48 +29,86 @@ PROPERTY_TYPE_MAP = {
 }
 
 
-def build_sold_search_params(suburb: str, property_type: str, postcode: str) -> dict:
-    """Build search parameters for Domain sold listings API."""
+REVERSE_PROPERTY_TYPE_MAP = {
+    'house': ['House', 'Townhouse', 'Villa', 'DuplexSemi-detached', 'Terrace'],
+    'unit': ['ApartmentUnitFlat'],
+}
+
+
+def build_sold_search_body(suburb: str, property_type: str, postcode: str) -> dict:
+    """Build POST body for Domain listings search API."""
+    domain_types = REVERSE_PROPERTY_TYPE_MAP.get(property_type, ['House'])
     return {
-        'suburb': suburb,
-        'postcode': postcode,
-        'propertyTypes': [property_type],
+        'listingType': 'Sold',
+        'propertyTypes': domain_types,
+        'locations': [
+            {
+                'suburb': suburb,
+                'postcode': postcode,
+                'state': 'NSW',
+            }
+        ],
+        'pageSize': 20,
+        'sort': {
+            'sortKey': 'DateUpdated',
+            'direction': 'Descending',
+        },
     }
 
 
 def parse_sold_listing(raw: dict) -> Optional[dict]:
     """Parse a single Domain API sold listing into provisional_sales format.
 
+    Handles both the search endpoint response (nested under 'listing')
+    and flat listing format.
+
     Returns None if the listing is missing required data (e.g., no price).
     """
-    price = raw.get('price')
-    if not price:
-        return None
+    # Search endpoint wraps in {'type': ..., 'listing': {...}}
+    listing = raw.get('listing', raw)
 
-    domain_id = raw.get('id')
+    # Extract property details (may be nested or flat)
+    props = listing.get('propertyDetails', listing)
+
+    domain_id = listing.get('id') or raw.get('id')
     if not domain_id:
         return None
 
-    street_name = raw.get('streetName', '')
-    street_type = raw.get('streetType', '')
-    full_street = f"{street_name} {street_type}".strip()
+    # Price: check saleDetails first, then flat fields
+    sale_details = listing.get('saleDetails', {})
+    price = sale_details.get('soldPrice') or listing.get('price') or raw.get('price')
+    if not price:
+        return None
 
-    domain_type = raw.get('propertyType', '')
+    street_name = props.get('streetName', '') or props.get('street', '')
+    street_type = props.get('streetType', '')
+    full_street = f"{street_name} {street_type}".strip() if street_type else street_name
+
+    domain_type = props.get('propertyType', '')
     property_type = PROPERTY_TYPE_MAP.get(domain_type, 'other')
 
-    unit_number = raw.get('unitNumber') or None
-    house_number = raw.get('streetNumber', '')
-    suburb = raw.get('suburb', '')
-    postcode = raw.get('postcode', '')
-    sold_date = raw.get('soldDate', '')
+    unit_number = props.get('unitNumber') or None
+    house_number = props.get('streetNumber', '')
+    suburb = props.get('suburb', '')
+    postcode = props.get('postcode', '')
 
-    # Parse bedrooms/bathrooms/car spaces (may not be present in all responses)
-    bedrooms = raw.get('bedrooms')
-    bathrooms = raw.get('bathrooms')
-    car_spaces = raw.get('carSpaces') or raw.get('carspaces')
+    sold_date = sale_details.get('soldDate', '') or listing.get('soldDate', '') or raw.get('soldDate', '')
+    # Truncate datetime to date if needed (e.g. "2026-02-03T00:00:00" → "2026-02-03")
+    if sold_date and 'T' in sold_date:
+        sold_date = sold_date.split('T')[0]
+
+    bedrooms = props.get('bedrooms')
+    bathrooms = props.get('bathrooms')
+    car_spaces = props.get('carSpaces') or props.get('carspaces')
     bedrooms = int(bedrooms) if bedrooms is not None else None
     bathrooms = int(bathrooms) if bathrooms is not None else None
     car_spaces = int(car_spaces) if car_spaces is not None else None
+
+    # Build listing URL if we have enough info
+    listing_url = None
+    slug = listing.get('listingSlug', '')
+    if slug:
+        listing_url = f"https://www.domain.com.au/{slug}"
 
     address_normalised = normalise_address(
         unit_number=unit_number,
@@ -95,8 +133,8 @@ def parse_sold_listing(raw: dict) -> Optional[dict]:
         'bathrooms': bathrooms,
         'car_spaces': car_spaces,
         'address_normalised': address_normalised,
-        'listing_url': None,  # Domain API doesn't provide listing URLs
-        'source_site': None,
+        'listing_url': listing_url,
+        'source_site': 'domain.com.au',
         'status': 'unconfirmed',
         'raw_json': json.dumps(raw),
     }
@@ -110,15 +148,17 @@ def fetch_sold_listings(
     bedrooms: Optional[int] = None,
     bathrooms: Optional[int] = None,
 ) -> List[dict]:
-    """Fetch recent sold listings from Domain API.
+    """Fetch recent sold listings from Domain API search endpoint.
+
+    Uses POST /v1/listings/residential/_search with listingType=Sold.
 
     Args:
         suburb: Suburb name
         property_type: 'house' or 'unit'
         postcode: Postcode
         api_key: Domain API key (required)
-        bedrooms: Optional bedroom count for unit searches
-        bathrooms: Optional bathroom count for unit searches
+        bedrooms: Optional bedroom count (not used in query)
+        bathrooms: Optional bathroom count (not used in query)
 
     Returns:
         List of parsed provisional sale records.
@@ -130,31 +170,37 @@ def fetch_sold_listings(
     results = []
 
     try:
-        params = build_sold_search_params(suburb, property_type, postcode)
+        body = build_sold_search_body(suburb, property_type, postcode)
 
         headers = {
             'X-Api-Key': api_key,
+            'Content-Type': 'application/json',
             'Accept': 'application/json',
         }
 
         time.sleep(RATE_LIMIT_DELAY)
 
-        url = f"{DOMAIN_API_BASE}/salesResults/{suburb}"
-        response = requests.get(url, headers=headers, params=params, timeout=30)
+        url = f"{DOMAIN_API_BASE}/listings/residential/_search"
+        response = requests.post(url, headers=headers, json=body, timeout=30)
 
         if response.status_code == 200:
             listings = response.json()
             if not isinstance(listings, list):
-                listings = listings.get('listings', [])
+                listings = [listings] if listings else []
 
             for raw in listings:
                 parsed = parse_sold_listing(raw)
                 if parsed and parsed['property_type'] == property_type:
                     results.append(parsed)
 
-            logger.info(f"Fetched {len(results)} sold {property_type}s in {suburb} from Domain API")
+            logger.info(f"Domain API: {len(results)} sold {property_type}s in {suburb}")
         else:
             logger.warning(f"Domain API returned {response.status_code} for {suburb}")
+            # Log response body for debugging
+            try:
+                logger.debug(f"Domain API response: {response.text[:200]}")
+            except Exception:
+                pass
 
     except requests.RequestException as e:
         logger.error(f"Domain API request failed: {e}")
