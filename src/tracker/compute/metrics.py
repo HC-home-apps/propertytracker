@@ -41,6 +41,8 @@ class SaleRecord:
     source: str = 'confirmed'  # 'confirmed' (VG) or 'unconfirmed' (provisional)
     listing_url: Optional[str] = None
     bed_bath_car: Optional[str] = None  # e.g. "2bed/1bath/1car"
+    provisional_id: Optional[str] = None  # provisional_sales.id for review buttons
+    suburb: Optional[str] = None
 
 
 @dataclass
@@ -465,8 +467,8 @@ def get_new_sales_since_date(
         prov_params.append(segment.price_max)
 
     prov_query = f"""
-        SELECT sold_date, house_number, unit_number, street_name,
-               sold_price, listing_url, bedrooms, bathrooms, car_spaces
+        SELECT id, sold_date, house_number, unit_number, street_name,
+               sold_price, listing_url, bedrooms, bathrooms, car_spaces, suburb
         FROM provisional_sales
         WHERE {prov_where}
         ORDER BY sold_date DESC
@@ -499,6 +501,8 @@ def get_new_sales_since_date(
             source='unconfirmed',
             listing_url=row['listing_url'],
             bed_bath_car='/'.join(bbc_parts) if bbc_parts else None,
+            provisional_id=row['id'],
+            suburb=row['suburb'],
         ))
 
     return sales

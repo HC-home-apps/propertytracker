@@ -260,16 +260,6 @@ jobs:
           # Process any button responses from previous reviews
           python -m tracker review-poll || echo "No pending responses"
 
-      - name: Step 6b - Send new reviews with buttons
-        if: github.event.inputs.run_enrich != 'false'
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          # Send reviews with inline Yes/No buttons
-          python -m tracker review-buttons --segment revesby_houses --limit 10 || echo "No pending Revesby reviews"
-          python -m tracker review-buttons --segment wollstonecraft_units --limit 10 || echo "No pending Wollstonecraft reviews"
-
       - name: Save database to cache
         uses: actions/cache/save@v4
         if: always()

@@ -631,6 +631,88 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
         else:
             raise click.ClickException("Failed to send report")
 
+    # Send review buttons for unconfirmed sales shown in the report
+    _send_review_buttons_for_report(db, config, new_sales, dry_run)
+
+
+def _send_review_buttons_for_report(db: Database, config: dict, new_sales: dict, dry_run: bool):
+    """Send review buttons for unconfirmed sales that appeared in the report.
+
+    This ensures the user sees review buttons for exactly the same sales
+    shown inline in the report, not a separate 30-day trawl.
+    """
+    from tracker.compute.segments import SEGMENTS
+
+    # Collect unconfirmed sales by segment
+    for segment_code, sales in new_sales.items():
+        unconfirmed = [s for s in sales if s.source == 'unconfirmed' and s.provisional_id]
+        if not unconfirmed:
+            continue
+
+        seg = SEGMENTS.get(segment_code)
+        segment_name = seg.display_name if seg else segment_code
+
+        # Filter out sales that already had review buttons sent (e.g. from a re-run)
+        ids = [s.provisional_id for s in unconfirmed]
+        id_placeholders = ','.join(['?' for _ in ids])
+        already_sent = db.query(
+            f"SELECT id FROM provisional_sales WHERE id IN ({id_placeholders}) AND review_sent_at IS NOT NULL",
+            tuple(ids)
+        )
+        already_sent_ids = {r['id'] for r in already_sent}
+        unconfirmed = [s for s in unconfirmed if s.provisional_id not in already_sent_ids]
+        if not unconfirmed:
+            continue
+
+        # Build sales list in the format send_review_digest expects
+        sales_list = []
+        for sale in unconfirmed:
+            # Format sold date
+            year_built_label = ""
+            if sale.contract_date:
+                try:
+                    d = datetime.strptime(sale.contract_date, '%Y-%m-%d')
+                    year_built_label = f"Sold {d.strftime('%-d %b %Y')}"
+                except (ValueError, TypeError):
+                    year_built_label = f"Sold {sale.contract_date}"
+
+            sales_list.append({
+                'sale_id': sale.provisional_id,
+                'address': f"{sale.address}, {sale.suburb}" if sale.suburb else sale.address,
+                'price': sale.price,
+                'area_sqm': sale.area_sqm,
+                'zoning_label': sale.bed_bath_car or "Details unknown",
+                'year_built_label': year_built_label,
+                'listing_url': sale.listing_url,
+            })
+
+        if dry_run:
+            click.echo(f"\n[Review] Would send {len(sales_list)} review(s) for {segment_name}")
+            for s in sales_list:
+                click.echo(f"  {s['address']} - ${s['price']:,}")
+            continue
+
+        telegram_config = TelegramConfig.from_env()
+
+        # Send in chunks of max 5
+        chunk_size = 5
+        total_sent = 0
+        for i in range(0, len(sales_list), chunk_size):
+            chunk = sales_list[i:i + chunk_size]
+            success = send_review_digest(telegram_config, segment_name, chunk, segment_code)
+            if success:
+                now = datetime.now(timezone.utc).isoformat()
+                for sale in chunk:
+                    db.execute(
+                        "UPDATE provisional_sales SET review_sent_at = ? WHERE id = ?",
+                        (now, sale['sale_id'])
+                    )
+                    total_sent += 1
+                click.echo(f"  Sent {segment_name} review digest with {len(chunk)} sales")
+
+        if total_sent > 0:
+            click.echo(f"  {segment_name}: {total_sent} review(s) sent")
+
 
 def _send_detailed_report(db: Database, config: dict, reference_date: date, dry_run: bool):
     """Send the full detailed report with gap tracker and affordability."""
