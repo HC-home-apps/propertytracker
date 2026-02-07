@@ -187,7 +187,7 @@ jobs:
           fi
           python -m tracker ingest $FORCE_FLAG
 
-      - name: Step 1b - Ingest sold listings (DuckDuckGo + Domain scrape)
+      - name: Step 1b - Ingest sold listings (DuckDuckGo multi-site search)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |

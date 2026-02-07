@@ -45,7 +45,11 @@ def build_search_query(
     bedrooms: Optional[int] = None,
     bathrooms: Optional[int] = None,
 ) -> str:
-    """Build a search query string for sold properties on domain.com.au.
+    """Build a search query string for sold properties across real estate sites.
+
+    Searches across all major AU real estate sites (domain.com.au,
+    realestate.com.au, allhomes.com.au) to maximise coverage.
+    The result parser filters to known real estate domains only.
 
     Keep query broad — bed/bath filters narrow DDG results too aggressively
     and miss listings that don't have exact text in their title.
@@ -61,7 +65,7 @@ def build_search_query(
         Search query string
     """
     type_label = 'apartment' if property_type == 'unit' else 'house'
-    return f'site:domain.com.au sold {suburb} {type_label}'
+    return f'sold {suburb} NSW {type_label} site:domain.com.au OR site:realestate.com.au'
 
 
 def parse_search_results_html(html: str) -> List[dict]:
