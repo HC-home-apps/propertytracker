@@ -964,12 +964,12 @@ def format_simple_report(
             lines.append(f"{pos.display_name}: {median_str} median")
 
     # Section 3: Recent Unconfirmed Sales
-    # Filter: only show last 60 days (if date known), include price-unknown listings
+    # Filter: show last 120 days (if date known), include date-unknown listings
     from datetime import datetime, timedelta
-    _cutoff = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+    _cutoff = (datetime.now() - timedelta(days=120)).strftime('%Y-%m-%d')
 
     def _filter_provisional(sales_list):
-        """Filter provisional sales: within last 60 days (or date unknown)."""
+        """Filter provisional sales: within last 120 days (or date unknown)."""
         return [
             s for s in sales_list
             if not s.get('sold_date') or s.get('sold_date', '') >= _cutoff

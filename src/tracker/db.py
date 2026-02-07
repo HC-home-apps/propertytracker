@@ -463,12 +463,20 @@ class Database:
         return rows[0] if rows else None
 
     def upsert_provisional_sales(self, sales: list) -> int:
-        """Insert provisional sales, ignoring duplicates. Returns count of new records."""
+        """Insert provisional sales, merging missing fields on conflict.
+
+        On duplicate ID (same normalised address), fills in NULL fields from
+        the new record. This handles the case where realestate.com.au results
+        (no price in snippet) are later supplemented by domain.com.au results
+        (with price).
+
+        Returns count of new records inserted.
+        """
         if not sales:
             return 0
 
         sql = """
-            INSERT OR IGNORE INTO provisional_sales (
+            INSERT INTO provisional_sales (
                 id, source, unit_number, house_number, street_name,
                 suburb, postcode, property_type, sold_price, sold_date,
                 bedrooms, bathrooms, car_spaces,
@@ -479,6 +487,17 @@ class Database:
                 :bedrooms, :bathrooms, :car_spaces,
                 :address_normalised, :listing_url, :source_site, :status, :raw_json
             )
+            ON CONFLICT(id) DO UPDATE SET
+                sold_price = COALESCE(provisional_sales.sold_price, excluded.sold_price),
+                sold_date = COALESCE(provisional_sales.sold_date, excluded.sold_date),
+                bedrooms = COALESCE(provisional_sales.bedrooms, excluded.bedrooms),
+                bathrooms = COALESCE(provisional_sales.bathrooms, excluded.bathrooms),
+                car_spaces = COALESCE(provisional_sales.car_spaces, excluded.car_spaces),
+                listing_url = CASE
+                    WHEN provisional_sales.listing_url IS NULL OR provisional_sales.listing_url = ''
+                    THEN excluded.listing_url
+                    ELSE provisional_sales.listing_url
+                END
         """
 
         conn = self._get_conn()
@@ -486,8 +505,13 @@ class Database:
         inserted = 0
 
         for sale in sales:
+            # Check if this ID already exists
+            existing = cursor.execute(
+                "SELECT id FROM provisional_sales WHERE id = ?",
+                (sale['id'],)
+            ).fetchone()
             cursor.execute(sql, sale)
-            if cursor.rowcount > 0:
+            if not existing and cursor.rowcount > 0:
                 inserted += 1
 
         conn.commit()
