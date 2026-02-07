@@ -399,14 +399,39 @@ def fetch_sold_listings_scrape(
                 else:
                     logger.debug("No __NEXT_DATA__ tag found in HTML")
 
+        # Debug: log first listing to understand the data structure
+        if raw_listings:
+            sample = raw_listings[0]
+            logger.info(
+                f"Sample listing keys: {list(sample.keys())}, "
+                f"address='{sample.get('address', '')}', "
+                f"price={sample.get('price')}, "
+                f"property_type='{sample.get('property_type', '')}', "
+                f"sold_date='{sample.get('sold_date', '')}'"
+            )
+
         # Convert to provisional_sales format
+        skipped_no_parse = 0
+        skipped_type_mismatch = 0
         for listing_data in raw_listings:
             parsed = _parse_listing_from_card(listing_data, suburb, postcode)
-            if parsed and parsed['property_type'] == property_type:
+            if not parsed:
+                skipped_no_parse += 1
+                continue
+            if parsed['property_type'] == property_type:
                 results.append(parsed)
-            elif parsed and listing_data.get('property_type') == 'other':
+            elif listing_data.get('property_type') == 'other':
                 parsed['property_type'] = property_type
                 results.append(parsed)
+            else:
+                skipped_type_mismatch += 1
+
+        if skipped_no_parse or skipped_type_mismatch:
+            logger.info(
+                f"Filtering: {skipped_no_parse} unparseable, "
+                f"{skipped_type_mismatch} type mismatch "
+                f"(wanted '{property_type}')"
+            )
 
         logger.info(f"Domain scrape: {len(results)} sold {property_type}s in {suburb}")
 
