@@ -29,6 +29,8 @@ PROPERTY_TYPE_MAP = {
 
 def build_sold_listings_url(suburb: str, postcode: str, property_type: str) -> str:
     """Build Domain.com.au sold listings URL for a suburb."""
+    # Ensure postcode is a clean string (DB may return float like 2212.0)
+    postcode = str(int(float(postcode))) if postcode else ''
     slug = f"{suburb.lower().replace(' ', '-')}-nsw-{postcode}"
     ptype = 'apartment' if property_type == 'unit' else 'house'
     return f"https://www.domain.com.au/sold-listings/{slug}/?ptype={ptype}&sort=dateupdated-desc"
@@ -391,22 +393,29 @@ def fetch_sold_listings_scrape(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-http2',
+                ],
+            )
             context = browser.new_context(
                 user_agent=(
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'Mozilla/5.0 (X11; Linux x86_64) '
                     'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/124.0.0.0 Safari/537.36'
+                    'Chrome/131.0.0.0 Safari/537.36'
                 ),
                 viewport={'width': 1280, 'height': 800},
+                ignore_https_errors=True,
             )
             page = context.new_page()
 
-            # Navigate and wait for content
-            page.goto(url, wait_until='networkidle', timeout=30000)
+            # Navigate — use domcontentloaded since networkidle can hang
+            page.goto(url, wait_until='domcontentloaded', timeout=30000)
 
-            # Extra wait for dynamic content
-            page.wait_for_timeout(3000)
+            # Wait for dynamic content to render
+            page.wait_for_timeout(5000)
 
             # Extract listings
             raw_listings = _extract_listings_from_page(page)
