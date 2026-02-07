@@ -610,10 +610,18 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
     # Clean up bad provisional records before displaying
     db.cleanup_provisional_sales()
 
+    # Check for VG price discrepancies (confirmed provisionals where price changed)
+    price_discrepancies = db.get_recent_price_discrepancies(
+        since_date=last_report_date.isoformat()
+    )
+    if price_discrepancies:
+        click.echo(f"  {len(price_discrepancies)} VG price adjustment(s) found")
+
     # Format report (new_sales already includes provisional sales inline)
     period_str = reference_date.strftime('%b %-d, %Y')
     message = format_simple_report(
         new_sales, positions, period_str, config,
+        price_discrepancies=price_discrepancies,
     )
 
     if dry_run:
@@ -624,6 +632,7 @@ def _send_simple_report(db: Database, config: dict, reference_date: date, dry_ru
         telegram_config = TelegramConfig.from_env()
         success = send_simple_report(
             telegram_config, new_sales, positions, period_str, config,
+            price_discrepancies=price_discrepancies,
         )
 
         if success:

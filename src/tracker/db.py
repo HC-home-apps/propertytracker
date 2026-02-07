@@ -339,6 +339,10 @@ class Database:
         if 'use_in_median' not in ps_columns:
             conn.execute("ALTER TABLE provisional_sales ADD COLUMN use_in_median BOOLEAN DEFAULT FALSE")
 
+        # Migrate provisional_sales: add original_price for VG price discrepancy tracking
+        if 'original_price' not in ps_columns:
+            conn.execute("ALTER TABLE provisional_sales ADD COLUMN original_price INTEGER")
+
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_provisional_sales_review
             ON provisional_sales(review_status, review_sent_at)
@@ -532,14 +536,48 @@ class Database:
                ORDER BY sold_date DESC"""
         )
 
-    def mark_provisional_confirmed(self, provisional_id: str, dealing_number: str):
-        """Link a provisional sale to a VG record."""
-        self.execute(
-            """UPDATE provisional_sales
-               SET status = 'confirmed', matched_dealing_number = ?
-               WHERE id = ?""",
-            (dealing_number, provisional_id)
-        )
+    def mark_provisional_confirmed(
+        self, provisional_id: str, dealing_number: str,
+        vg_price: int = None, provisional_price: int = None,
+    ):
+        """Link a provisional sale to a VG record.
+
+        If vg_price differs from provisional_price, stores the original
+        provisional price in original_price and updates sold_price to VG.
+        """
+        if vg_price and provisional_price and vg_price != provisional_price:
+            self.execute(
+                """UPDATE provisional_sales
+                   SET status = 'confirmed', matched_dealing_number = ?,
+                       original_price = sold_price, sold_price = ?
+                   WHERE id = ?""",
+                (dealing_number, vg_price, provisional_id)
+            )
+        else:
+            self.execute(
+                """UPDATE provisional_sales
+                   SET status = 'confirmed', matched_dealing_number = ?
+                   WHERE id = ?""",
+                (dealing_number, provisional_id)
+            )
+
+    def get_recent_price_discrepancies(self, since_date: str = None) -> list:
+        """Get provisional sales confirmed by VG with a price difference.
+
+        Returns records where original_price is set (meaning VG price differed).
+        """
+        query = """
+            SELECT house_number, unit_number, street_name, suburb,
+                   original_price, sold_price as vg_price, sold_date
+            FROM provisional_sales
+            WHERE status = 'confirmed' AND original_price IS NOT NULL
+        """
+        params = []
+        if since_date:
+            query += " AND sold_date >= ?"
+            params.append(since_date)
+        query += " ORDER BY sold_date DESC"
+        return self.query(query, tuple(params))
 
     def cleanup_provisional_sales(self) -> int:
         """Remove bad records from provisional_sales.

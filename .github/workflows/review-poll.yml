@@ -1,18 +1,18 @@
-name: Process Review Response
+name: Process Review Responses
 
 on:
-  # Triggered by Cloudflare Worker webhook when user taps a button
-  repository_dispatch:
-    types: [review-response]
+  # Poll hourly for button responses — deletes review messages within ~1 hour
+  schedule:
+    - cron: '15 * * * *'  # Every hour at :15
 
-  # Manual trigger (fallback)
+  # Manual trigger
   workflow_dispatch: {}
 
 env:
   PYTHON_VERSION: '3.11'
 
 jobs:
-  update-review:
+  poll:
     runs-on: ubuntu-latest
 
     steps:
@@ -30,6 +30,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
+      - name: Create minimal config
+        run: |
+          cat > config.yml << 'EOF'
+          segments:
+            revesby_houses:
+              display_name: "Revesby Houses (IP)"
+              suburbs: [revesby, revesby heights]
+              property_type: house
+              role: proxy
+            wollstonecraft_units:
+              display_name: "Wollstonecraft Units (PPOR)"
+              suburbs: [wollstonecraft]
+              property_type: unit
+              role: proxy
+          EOF
+
       - name: Download cached database
         uses: actions/cache@v4
         with:
@@ -38,70 +54,17 @@ jobs:
           restore-keys: |
             tracker-db-
 
-      - name: Create minimal config
-        run: |
-          cat > config.yml << 'EOF'
-          segments: {}
-          EOF
+      - name: Create data directory
+        run: mkdir -p data
 
-      - name: Process review response
-        if: github.event_name == 'repository_dispatch'
-        env:
-          SALE_IDS: ${{ toJson(github.event.client_payload.sale_ids) }}
-          RESPONSE: ${{ github.event.client_payload.response }}
-          SEGMENT_CODE: ${{ github.event.client_payload.segment_code }}
-        run: |
-          python -c "
-          import os
-          import json
-          from datetime import datetime, timezone
-          from tracker.db import Database
-
-          db = Database('data/tracker.db')
-          db.init_schema()
-
-          sale_ids_json = os.environ.get('SALE_IDS', '[]')
-          sale_ids = json.loads(sale_ids_json)
-          response = os.environ['RESPONSE']
-          segment = os.environ.get('SEGMENT_CODE', '')
-
-          status = 'comparable' if response == 'yes' else 'not_comparable'
-          use_in_median = 1 if response == 'yes' else 0
-          now = datetime.now(timezone.utc).isoformat()
-
-          def is_provisional(sid):
-              return sid.startswith('google-') or sid.startswith('domain-')
-
-          total_updated = 0
-          for sale_id in sale_ids:
-              if is_provisional(sale_id):
-                  result = db.execute('''
-                      UPDATE provisional_sales
-                      SET review_status = ?, use_in_median = ?, reviewed_at = ?
-                      WHERE id = ?
-                  ''', (status, use_in_median, now, sale_id))
-              else:
-                  result = db.execute('''
-                      UPDATE sale_classifications
-                      SET review_status = ?, use_in_median = ?, reviewed_at = ?, updated_at = ?
-                      WHERE sale_id = ?
-                  ''', (status, use_in_median, now, now, sale_id))
-              total_updated += result
-              print(f'{sale_id} ({segment}): {status} [{"provisional" if is_provisional(sale_id) else "vg"}]')
-
-          print(f'Total rows updated: {total_updated}')
-          db.close()
-          "
-
-      - name: Manual poll (workflow_dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Process review responses
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -m tracker review-poll || echo "No pending responses"
 
-      - name: Save database to cache
+      - name: Save database
         uses: actions/cache/save@v4
         if: always()
         with:

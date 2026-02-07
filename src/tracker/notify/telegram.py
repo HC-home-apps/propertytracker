@@ -950,6 +950,7 @@ def format_simple_report(
     config: Optional[dict] = None,
     provisional_sales: Optional[List[dict]] = None,
     provisional_by_segment: Optional[Dict[str, List[dict]]] = None,
+    price_discrepancies: Optional[List[dict]] = None,
 ) -> str:
     """
     Format a simplified weekly report.
@@ -1060,6 +1061,21 @@ def format_simple_report(
         else:
             lines.append(f"{pos.display_name}: {median_str} median")
 
+    # Section 3: Price discrepancies (VG confirmed with different price)
+    if price_discrepancies:
+        lines.append("")
+        lines.append("<i>VG price adjustments:</i>")
+        for d in price_discrepancies:
+            unit = f"Unit {d['unit_number']} " if d['unit_number'] else ""
+            house = d['house_number'] or ""
+            addr = f"{unit}{house} {d['street_name']}".strip()
+            diff = d['vg_price'] - d['original_price']
+            sign = "+" if diff > 0 else ""
+            lines.append(
+                f"  {addr}: {format_currency(d['original_price'])} → "
+                f"{format_currency(d['vg_price'])} ({sign}{format_currency(diff)})"
+            )
+
     return "\n".join(lines)
 
 
@@ -1071,11 +1087,13 @@ def send_simple_report(
     app_config: Optional[dict] = None,
     provisional_sales: Optional[List[dict]] = None,
     provisional_by_segment: Optional[Dict[str, List[dict]]] = None,
+    price_discrepancies: Optional[List[dict]] = None,
 ) -> bool:
     """Send the simplified report via Telegram (to report chat if configured)."""
     message = format_simple_report(
         new_sales, positions, period, app_config,
         provisional_sales=provisional_sales,
         provisional_by_segment=provisional_by_segment,
+        price_discrepancies=price_discrepancies,
     )
     return send_message(config, message, use_report_chat=True)

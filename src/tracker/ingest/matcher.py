@@ -37,7 +37,7 @@ def match_provisional_to_vg(db: Database) -> int:
 
         candidates = db.query(
             """SELECT dealing_number, unit_number, house_number,
-                      street_name, suburb, postcode, contract_date
+                      street_name, suburb, postcode, contract_date, purchase_price
                FROM raw_sales
                WHERE LOWER(suburb) = LOWER(?)
                  AND property_type = ?
@@ -56,9 +56,18 @@ def match_provisional_to_vg(db: Database) -> int:
             )
 
             if cand_normalised == prov_normalised:
+                vg_price = candidate.get('purchase_price')
+                prov_price = sale.get('sold_price')
                 db.mark_provisional_confirmed(
-                    sale['id'], candidate['dealing_number']
+                    sale['id'], candidate['dealing_number'],
+                    vg_price=vg_price, provisional_price=prov_price,
                 )
+                if vg_price and prov_price and vg_price != prov_price:
+                    logger.warning(
+                        f"Price mismatch for {sale['id']}: "
+                        f"provisional ${prov_price:,} -> VG ${vg_price:,} "
+                        f"(diff ${abs(vg_price - prov_price):,})"
+                    )
                 logger.info(
                     f"Matched provisional {sale['id']} -> VG {candidate['dealing_number']}"
                 )
