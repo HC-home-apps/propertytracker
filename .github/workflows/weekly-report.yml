@@ -166,7 +166,7 @@ jobs:
 
       - name: Install Playwright browser
         run: |
-          playwright install chromium --with-deps
+          playwright install firefox --with-deps
 
       - name: Create data directories
         run: |

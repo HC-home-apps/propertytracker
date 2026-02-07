@@ -282,7 +282,10 @@ def _parse_json_ld(data) -> List[dict]:
 
 
 def _launch_browser():
-    """Launch a stealth headless Chromium browser via Playwright.
+    """Launch a stealth headless Firefox browser via Playwright.
+
+    Firefox has a different TLS fingerprint from Chromium, which helps
+    bypass CDN-level bot detection (e.g. Akamai) that blocks Chromium.
 
     Returns (playwright_instance, browser, page) tuple.
     Caller must close browser and stop playwright when done.
@@ -290,32 +293,17 @@ def _launch_browser():
     from playwright.sync_api import sync_playwright
 
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-        ],
-    )
+
+    # Use Firefox — Domain's CDN blocks Chromium's TLS/HTTP2 fingerprint
+    # with ERR_HTTP2_PROTOCOL_ERROR. Firefox has a distinct fingerprint
+    # that is less commonly blocked.
+    browser = pw.firefox.launch(headless=True)
     context = browser.new_context(
         viewport={'width': 1920, 'height': 1080},
-        user_agent=(
-            'Mozilla/5.0 (X11; Linux x86_64) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/131.0.0.0 Safari/537.36'
-        ),
         locale='en-AU',
         timezone_id='Australia/Sydney',
     )
     page = context.new_page()
-
-    # Hide webdriver flag so Domain doesn't detect automation
-    page.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => false });
-        // Remove Playwright-specific properties
-        delete window.__playwright;
-        delete window.__pw_manual;
-    """)
 
     return pw, browser, page
 
