@@ -989,20 +989,13 @@ def format_simple_report(
             continue
 
         filter_desc = segment.get_filter_description() or ""
-        confirmed_count = sum(1 for s in sales if s.source == 'confirmed')
-        unconfirmed_count = sum(1 for s in sales if s.source == 'unconfirmed')
         total = len(sales)
 
         # Header with filter info and counts
         header = f"<b>{segment.display_name}</b>"
         if filter_desc:
             header += f" ({filter_desc})"
-        if unconfirmed_count > 0 and confirmed_count > 0:
-            header += f" - {total} new ({unconfirmed_count} unconfirmed)"
-        elif unconfirmed_count > 0:
-            header += f" - {total} new (unconfirmed)"
-        else:
-            header += f" - {total} new"
+        header += f" - {total} new"
         lines.append(header)
 
         if sales:
@@ -1023,9 +1016,6 @@ def format_simple_report(
                     line = f"  {date_str}: {addr_display} - {price_str} ({sale.bed_bath_car})"
                 else:
                     line = f"  {date_str}: {addr_display} - {price_str}"
-
-                if sale.source == 'unconfirmed':
-                    line += " <i>(unconfirmed)</i>"
 
                 lines.append(line)
         else:

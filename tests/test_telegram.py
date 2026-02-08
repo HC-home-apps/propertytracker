@@ -457,10 +457,10 @@ class TestProvisionalSalesInReport:
             config={'report': {'show_proxies': ['wollstonecraft_units']}},
         )
         assert 'Morton St' in report
-        assert 'unconfirmed' in report
         assert '$1,200,000' in report
         assert '2bed/1bath/1car' in report
-        assert '1 new (unconfirmed)' in report
+        assert '1 new' in report
+        assert 'unconfirmed' not in report
 
     def test_no_section_when_empty(self):
         from tracker.notify.telegram import format_simple_report
@@ -497,10 +497,10 @@ class TestProvisionalSalesInReport:
             period='Feb 6, 2026',
             config={'report': {'show_proxies': ['wollstonecraft_units']}},
         )
-        assert '2 new (1 unconfirmed)' in report
+        assert '2 new' in report
         assert 'Test St' in report
         assert 'Morton St' in report
-        assert 'unconfirmed' in report
+        assert 'unconfirmed' not in report
 
     def test_target_segments_shown_when_have_sales(self):
         from tracker.notify.telegram import format_simple_report
